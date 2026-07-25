@@ -19,7 +19,7 @@ WORKDIR /src
 # 1) 先拷贝 module 清单(几乎不变,缓存命中率最高)
 COPY go.mod go.sum ./
 # 2) 用 cache mount 拉 module,持久化到 /go/pkg/mod
-RUN --mount=type=cache,target=/go/pkg/mod \
+RUN --mount=type=cache,id=aurora-go-mod,target=/go/pkg/mod \
     go mod download -x
 
 # 3) 拷贝其余源码(改动频繁,缓存粒度细)
@@ -34,8 +34,8 @@ ENV CGO_ENABLED=0 \
     GOARCH=${TARGETARCH}
 
 # 4) 编译:cache mount 让 go build 复用上次编译结果
-RUN --mount=type=cache,target=/root/.cache/go-build \
-    --mount=type=cache,target=/go/pkg/mod \
+RUN --mount=type=cache,id=aurora-go-build,target=/root/.cache/go-build \
+    --mount=type=cache,id=aurora-go-mod,target=/go/pkg/mod \
     go build -trimpath -ldflags='-s -w -buildid=' -o /out/aurora .
 
 # ---- 阶段 2: 运行镜像(distroless,~2MB,无 shell 更安全)----
