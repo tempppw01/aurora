@@ -181,10 +181,11 @@ func HandlerDetailedWithOptions(c *gin.Context, response *http.Response, client 
 	var convId string
 	var sentinel []map[string]interface{}
 	var thinkingText string
+	var emittedText string
 	var activeChannel string
 	var assistantMessageID string
 	visibleText := func() string {
-		return strings.Join(imgSource, "") + chatgpt.StripInternalCitationMarkers(previous_text.Text)
+		return strings.Join(imgSource, "") + emittedText
 	}
 	artifactState := newArtifactAccumulator()
 	artifactConfig := ArtifactStreamConfig{Delivery: options.ArtifactDelivery}
@@ -406,6 +407,9 @@ readLoop:
 				if rawDeltaText != "" {
 					previous_text.Text += rawDeltaText
 				}
+				if deltaText != "" {
+					emittedText += deltaText
+				}
 				if streamEvent.isStop {
 					if max_tokens && convId != "" && assistantMessageID != "" {
 						finalizeArtifacts()
@@ -526,7 +530,14 @@ readLoop:
 				if isRole {
 					translated_response.Choices[0].Delta.Role = original_response.Message.Author.Role
 				}
-				response_string = "data: " + translated_response.String() + "\n\n"
+				// A multimodal response can contain normal text before or after
+				// image descriptors. Emit that text first so it is not discarded
+				// while the renderer handles the image assets.
+				if chatgpt.TextFromParts(original_response.Message.Content.Parts) != "" {
+					response_string = chatgpt.ConvertToString(&original_response, &previous_text, isRole, model)
+				} else {
+					response_string = "data: " + translated_response.String() + "\n\n"
+				}
 			}
 			if response_string == "" {
 				response_string = chatgpt.ConvertToString(&original_response, &previous_text, isRole, model)
@@ -551,9 +562,13 @@ readLoop:
 				max_tokens = isTokenLimitFinish(finish_reason)
 			}
 			willContinue := isEnd && max_tokens && convId != "" && assistantMessageID != ""
+			legacyDelta := chatCompletionDelta(response_string)
+			if legacyDelta != "" {
+				emittedText += legacyDelta
+			}
 			if options.OnTextDelta != nil {
-				if delta := chatCompletionDelta(response_string); delta != "" {
-					options.OnTextDelta(delta)
+				if legacyDelta != "" {
+					options.OnTextDelta(legacyDelta)
 				}
 			}
 			if writeStream {

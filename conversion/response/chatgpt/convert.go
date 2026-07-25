@@ -1,13 +1,15 @@
 package chatgpt
 
 import (
+	"strings"
+
 	"aurora/typings"
 	chatgpt_types "aurora/typings/chatgpt"
 	official_types "aurora/typings/official"
 )
 
 func ConvertToString(chatgpt_response *chatgpt_types.ChatGPTResponse, previous_text *typings.StringStruct, role bool, model string) string {
-	currentText := firstTextPart(chatgpt_response.Message.Content.Parts)
+	currentText := TextFromParts(chatgpt_response.Message.Content.Parts)
 	deltaText := SanitizedSnapshotDelta(previous_text.Text, currentText)
 	previous_text.Text = currentText
 	translated_response := official_types.NewChatCompletionChunk(deltaText, model)
@@ -19,10 +21,15 @@ func ConvertToString(chatgpt_response *chatgpt_types.ChatGPTResponse, previous_t
 	return "data: " + translated_response.String() + "\n\n"
 }
 
-func firstTextPart(parts []interface{}) string {
-	if len(parts) == 0 {
-		return ""
+// TextFromParts keeps all textual parts from a ChatGPT message. Rich replies
+// can interleave image descriptors and text; taking only Parts[0] loses any
+// text positioned after an image descriptor.
+func TextFromParts(parts []interface{}) string {
+	var text strings.Builder
+	for _, part := range parts {
+		if value, ok := part.(string); ok {
+			text.WriteString(value)
+		}
 	}
-	text, _ := parts[0].(string)
-	return text
+	return text.String()
 }

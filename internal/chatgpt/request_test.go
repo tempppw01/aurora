@@ -113,6 +113,29 @@ func TestHandlerDoesNotDropTextAfterLegacySourcePlaceholder(t *testing.T) {
 	}
 }
 
+func TestHandlerKeepsTextFromMultimodalResponseBeforeLaterText(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	body := strings.Join([]string{
+		`data: {"v":{"conversation_id":"conv-rich","message":{"id":"msg-rich","author":{"role":"assistant"},"channel":"final","content":{"content_type":"multimodal_text","parts":["开头内容"]},"metadata":{"message_type":"next"},"recipient":"all","end_turn":false}}}`,
+		`data: {"v":{"conversation_id":"conv-rich","message":{"id":"msg-rich","author":{"role":"assistant"},"channel":"final","content":{"content_type":"text","parts":["后半内容"]},"metadata":{"message_type":"next"},"recipient":"all","end_turn":true}}}`,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+	response := &http.Response{Body: io.NopCloser(strings.NewReader(body))}
+	writer := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(writer)
+
+	result := HandlerDetailed(c, response, nil, nil, "request-id", chatGPTRequestForTest(), true, "auto")
+
+	if result.Text != "开头内容后半内容" {
+		t.Fatalf("text = %q, want the multimodal and later text", result.Text)
+	}
+	if !strings.Contains(writer.Body.String(), `"content":"开头内容"`) || !strings.Contains(writer.Body.String(), `"content":"后半内容"`) {
+		t.Fatalf("stream output omitted rich-response text: %s", writer.Body.String())
+	}
+}
+
 func TestHandlerStreamsOpenAIChunksAndSentinel(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

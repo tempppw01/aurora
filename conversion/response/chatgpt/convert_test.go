@@ -50,3 +50,14 @@ func TestConvertToStringWaitsSourceMarkerForAnyModel(t *testing.T) {
 		t.Fatalf("data = %q, want source marker only", data)
 	}
 }
+
+func TestTextFromPartsKeepsTextAroundRichParts(t *testing.T) {
+	text := TextFromParts([]interface{}{
+		"开头",
+		map[string]interface{}{"content_type": "image_asset_pointer"},
+		"结尾",
+	})
+	if text != "开头结尾" {
+		t.Fatalf("text = %q, want all textual parts", text)
+	}
+}
