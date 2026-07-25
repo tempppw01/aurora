@@ -37,5 +37,7 @@ COPY --from=build /out/aurora /aurora
 # 应挂载在此目录，部署或重启后这些文件才能保留。
 WORKDIR /data
 EXPOSE 8080
-USER nonroot:nonroot
+# Railway 持久卷首次挂载通常由 root 创建。以 root 运行可保证管理台能够
+# 初始化并持续写入 /data；镜像本身仍为无 shell 的 distroless 运行时。
+USER root:root
 ENTRYPOINT ["/aurora"]
