@@ -33,6 +33,9 @@ RUN go build -trimpath -ldflags='-s -w -buildid=' -o /out/aurora .
 # ---- 阶段 2: 运行镜像(distroless,~2MB,无 shell 更安全)----
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /out/aurora /aurora
+# 管理台使用相对路径保存 token、账号元数据和 API 设置；Railway Volume
+# 应挂载在此目录，部署或重启后这些文件才能保留。
+WORKDIR /data
 EXPOSE 8080
 USER nonroot:nonroot
 ENTRYPOINT ["/aurora"]
