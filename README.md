@@ -119,6 +119,7 @@ ENABLE_EXTERNAL_TOKEN=true
 - `SERVER_HOST` / `SERVER_PORT`：服务监听地址和端口。`PORT` 为 `SERVER_PORT` 的 fallback。
 - `Authorization`：服务访问 key。配置后，请求头需携带 `Authorization: Bearer your_authorization`。
 - `ADMIN_TOKEN`：管理页面 API 的专用密钥。访问 `/admin` 后填入该密钥；未设置时回退使用 `Authorization`。两者都未设置时，账号管理 API 会拒绝请求，避免暴露 token。
+- 管理页面可更新 OpenAI 兼容 API 的访问密钥（`Authorization`）。该值会保存到 `admin_settings.json`；在容器部署时请将运行目录挂载到持久卷，避免账号与设置在重启后丢失。
 - `FREE_ACCOUNTS`：是否自动生成免费 UUID 账号，默认关闭。
 - `FREE_ACCOUNTS_NUM`：自动生成免费 UUID 账号数量，默认 1024。
 - `TLS_CERT` / `TLS_KEY`：同时配置时启用 HTTPS。

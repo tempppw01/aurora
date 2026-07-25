@@ -25,6 +25,7 @@ func TestAdminHandlerAddsListsAndDeletesFreeAccount(t *testing.T) {
 		"session": filepath.Join(dir, "session_tokens.txt"),
 		"free":    filepath.Join(dir, "free_tokens.txt"),
 	}
+	h.metadataPath = filepath.Join(dir, "account_metadata.json")
 
 	router := gin.New()
 	admin := router.Group("/admin/api").Use(h.Authorize)
@@ -111,5 +112,12 @@ func TestNormalizeManagedAccountRequest(t *testing.T) {
 	_, _, err = normalizeManagedAccountRequest(addManagedAccountRequest{Source: "auto", Token: "opaque-token"})
 	if err == nil {
 		t.Fatal("expected opaque auto-detection to require manual selection")
+	}
+}
+
+func TestEmailFromCredential(t *testing.T) {
+	email := emailFromCredential(`{"user":{"email":"person@example.test"},"accessToken":"not-used"}`)
+	if email != "person@example.test" {
+		t.Fatalf("email = %q", email)
 	}
 }

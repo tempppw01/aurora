@@ -30,12 +30,16 @@ type Config struct {
 }
 
 func Load() Config {
+	authorization := LoadAuthorization()
+	if authorization != "" {
+		_ = os.Setenv("Authorization", authorization)
+	}
 	return Config{
 		ServerHost:          getEnv("SERVER_HOST", "0.0.0.0"),
 		ServerPort:          getEnvWithFallback("SERVER_PORT", "PORT", "8080"),
 		TLSCert:             os.Getenv("TLS_CERT"),
 		TLSKey:              os.Getenv("TLS_KEY"),
-		Authorization:       os.Getenv("Authorization"),
+		Authorization:       authorization,
 		AdminToken:          getEnvWithFallback("ADMIN_TOKEN", "Authorization", ""),
 		BaseURL:             getEnv("BASE_URL", "https://chatgpt.com/backend-api"),
 		APIReverseProxy:     os.Getenv("API_REVERSE_PROXY"),

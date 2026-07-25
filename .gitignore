@@ -7,6 +7,8 @@ tools/authenticator/access_tokens.txt
 aurora
 tools/authenticator/.proxies.txt.swp
 .env
+admin_settings.json
+account_metadata.json
 *.har
 .idea/
 /logs/

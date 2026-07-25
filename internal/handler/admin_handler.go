@@ -3,6 +3,7 @@ package handler
 import (
 	"crypto/sha256"
 	_ "embed"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"aurora/internal/accounts"
 	"aurora/internal/chatgpt"
@@ -27,10 +29,13 @@ var adminPage []byte
 var accountFileMu sync.Mutex
 
 type managedAccount struct {
-	ID     string `json:"id"`
-	Source string `json:"source"`
-	Token  string `json:"token"`
-	TeamID string `json:"team_id,omitempty"`
+	ID         string `json:"id"`
+	Source     string `json:"source"`
+	Token      string `json:"token"`
+	TeamID     string `json:"team_id,omitempty"`
+	Email      string `json:"email,omitempty"`
+	ImportedAt string `json:"imported_at,omitempty"`
+	Status     string `json:"status,omitempty"`
 }
 
 type addManagedAccountRequest struct {
@@ -42,14 +47,31 @@ type addManagedAccountRequest struct {
 type credentialBundle struct {
 	AccessToken  string `json:"accessToken"`
 	SessionToken string `json:"sessionToken"`
+	User         struct {
+		Email string `json:"email"`
+	} `json:"user"`
+	Account struct {
+		Email string `json:"email"`
+	} `json:"account"`
+}
+
+type accountMetadata struct {
+	Email      string `json:"email,omitempty"`
+	ImportedAt string `json:"imported_at"`
+	Status     string `json:"status"`
+}
+
+type apiKeyRequest struct {
+	APIKey string `json:"api_key"`
 }
 
 // AdminHandler exposes the local account files through a deliberately
 // separate, token-protected management API.
 type AdminHandler struct {
-	pool  *accounts.Pool
-	cfg   *config.Config
-	files map[string]string
+	pool         *accounts.Pool
+	cfg          *config.Config
+	files        map[string]string
+	metadataPath string
 }
 
 func NewAdminHandler(pool *accounts.Pool, cfg *config.Config) *AdminHandler {
@@ -62,6 +84,7 @@ func NewAdminHandler(pool *accounts.Pool, cfg *config.Config) *AdminHandler {
 			"session": "session_tokens.txt",
 			"free":    "free_tokens.txt",
 		},
+		metadataPath: "account_metadata.json",
 	}
 }
 
@@ -95,13 +118,23 @@ func (h *AdminHandler) ListAccounts(c *gin.Context) {
 	defer accountFileMu.Unlock()
 
 	var result []managedAccount
+	metadata := h.loadMetadata()
 	for source, path := range h.files {
 		for _, raw := range accounts.LoadTokensFromFile(path) {
+			id := managedAccountID(source, raw.Token)
+			meta := metadata[id]
+			email := meta.Email
+			if email == "" {
+				email = emailFromCredential(raw.Token)
+			}
 			result = append(result, managedAccount{
-				ID:     managedAccountID(source, raw.Token),
-				Source: source,
-				Token:  maskCredential(raw.Token),
-				TeamID: raw.TeamID,
+				ID:         id,
+				Source:     source,
+				Token:      maskCredential(raw.Token),
+				TeamID:     raw.TeamID,
+				Email:      email,
+				ImportedAt: meta.ImportedAt,
+				Status:     meta.Status,
 			})
 		}
 	}
@@ -116,6 +149,7 @@ func (h *AdminHandler) AddAccount(c *gin.Context) {
 	}
 	var detectedAs string
 	var err error
+	email := emailFromCredential(req.Token)
 	req, detectedAs, err = normalizeManagedAccountRequest(req)
 	if err != nil {
 		respondError(c, http.StatusBadRequest, err)
@@ -151,12 +185,37 @@ func (h *AdminHandler) AddAccount(c *gin.Context) {
 		respondError(c, http.StatusInternalServerError, err)
 		return
 	}
+	metadata := h.loadMetadata()
+	id := managedAccountID(req.Source, req.Token)
+	metadata[id] = accountMetadata{Email: email, ImportedAt: time.Now().UTC().Format(time.RFC3339), Status: state}
+	if err := h.saveMetadata(metadata); err != nil {
+		respondError(c, http.StatusInternalServerError, fmt.Errorf("account was added but account metadata could not be saved: %w", err))
+		return
+	}
 	h.pool.AddAccount(acct)
 	c.JSON(http.StatusCreated, gin.H{
-		"data":        managedAccount{ID: managedAccountID(req.Source, req.Token), Source: req.Source, Token: maskCredential(req.Token), TeamID: req.TeamID},
+		"data":        managedAccount{ID: id, Source: req.Source, Token: maskCredential(req.Token), TeamID: req.TeamID, Email: email, ImportedAt: metadata[id].ImportedAt, Status: state},
 		"status":      state,
 		"detected_as": detectedAs,
 	})
+}
+
+func (h *AdminHandler) GetAPIKey(c *gin.Context) {
+	key := config.LoadAuthorization()
+	c.JSON(http.StatusOK, gin.H{"configured": key != "", "hint": maskCredential(key)})
+}
+
+func (h *AdminHandler) UpdateAPIKey(c *gin.Context) {
+	var req apiKeyRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		respondError(c, http.StatusBadRequest, errors.New("request must be proper JSON"))
+		return
+	}
+	if err := config.SaveAuthorization(req.APIKey); err != nil {
+		respondError(c, http.StatusBadRequest, errors.New("API key must not be empty"))
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"configured": true, "hint": maskCredential(req.APIKey)})
 }
 
 // normalizeManagedAccountRequest supports the management page's automatic
@@ -245,8 +304,80 @@ func (h *AdminHandler) DeleteAccount(c *gin.Context) {
 		respondError(c, http.StatusInternalServerError, err)
 		return
 	}
+	metadata := h.loadMetadata()
+	delete(metadata, id)
+	if err := h.saveMetadata(metadata); err != nil {
+		respondError(c, http.StatusInternalServerError, fmt.Errorf("account was removed but account metadata could not be updated: %w", err))
+		return
+	}
 	h.pool.RemoveAccountByCredential(removedToken)
 	c.Status(http.StatusNoContent)
+}
+
+func (h *AdminHandler) loadMetadata() map[string]accountMetadata {
+	metadata := make(map[string]accountMetadata)
+	data, err := os.ReadFile(h.metadataPath)
+	if err != nil {
+		return metadata
+	}
+	_ = json.Unmarshal(data, &metadata)
+	return metadata
+}
+
+func (h *AdminHandler) saveMetadata(metadata map[string]accountMetadata) error {
+	data, err := json.MarshalIndent(metadata, "", "  ")
+	if err != nil {
+		return err
+	}
+	dir := filepath.Dir(h.metadataPath)
+	tmp, err := os.CreateTemp(dir, ".aurora-metadata-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if err := tmp.Chmod(0600); err != nil {
+		tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(append(data, '\n')); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, h.metadataPath)
+}
+
+func emailFromCredential(credential string) string {
+	var bundle credentialBundle
+	if json.Unmarshal([]byte(credential), &bundle) == nil {
+		if email := strings.TrimSpace(bundle.User.Email); email != "" {
+			return email
+		}
+		if email := strings.TrimSpace(bundle.Account.Email); email != "" {
+			return email
+		}
+	}
+	parts := strings.Split(credential, ".")
+	if len(parts) != 3 {
+		return ""
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return ""
+	}
+	var claims map[string]interface{}
+	if json.Unmarshal(payload, &claims) != nil {
+		return ""
+	}
+	for _, key := range []string{"email", "https://api.openai.com/profile.email"} {
+		if email, ok := claims[key].(string); ok {
+			return strings.TrimSpace(email)
+		}
+	}
+	return ""
 }
 
 func (h *AdminHandler) newManagedAccount(req addManagedAccountRequest) (*accounts.Account, string, error) {

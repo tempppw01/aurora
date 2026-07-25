@@ -13,15 +13,15 @@ import (
 	"aurora/httpclient/bogdanfinn"
 	"aurora/internal/accounts"
 	"aurora/internal/chatgpt"
+	"aurora/internal/config"
 	chatgpt_types "aurora/typings/chatgpt"
 	officialtypes "aurora/typings/official"
 	"aurora/util"
-	"aurora/internal/config"
 
-	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
 	fhttp "github.com/bogdanfinn/fhttp"
 	"github.com/bogdanfinn/websocket"
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 )
 
 var ErrNoAvailable = errors.New("no available account of the requested type")
@@ -61,7 +61,7 @@ func resolveAccount(c *gin.Context, pool *accounts.Pool, cfg *config.Config, nee
 		}
 	}
 
-	expected := cfg.Authorization
+	expected := os.Getenv("Authorization")
 
 	// 无 token 或匹配全局密钥 → 先尝试 free,再 fallback 到 noauth
 	if token == "" || (expected != "" && token == expected) {
