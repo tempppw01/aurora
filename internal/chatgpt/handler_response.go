@@ -320,7 +320,7 @@ readLoop:
 				}
 				if streamEvent.finishReason != "" {
 					finish_reason = streamEvent.finishReason
-					if finish_reason == "length" {
+					if isTokenLimitFinish(finish_reason) {
 						max_tokens = true
 					}
 					isEnd = true
@@ -328,12 +328,13 @@ readLoop:
 				if activeChannel == "analysis" {
 					emitThinking(streamEvent.text)
 					if streamEvent.isStop {
-						if writeStream {
+						willContinue := max_tokens && convId != "" && assistantMessageID != ""
+						if writeStream && !willContinue {
 							finalLine := official_types.StopChunkWithConversation(finish_reason, model, convId)
 							c.Writer.WriteString("data: " + finalLine.String() + "\n\n")
 							c.Writer.Flush()
 						}
-						if max_tokens && convId != "" && assistantMessageID != "" {
+						if willContinue {
 							finalizeArtifacts()
 							return HandlerResult{
 								Text:              visibleText(),
@@ -345,7 +346,7 @@ readLoop:
 								SandboxArtifacts:  artifactState.SandboxArtifacts,
 								PDFArtifacts:      artifactState.PDFArtifacts,
 								GeneratedImageIDs: artifactState.ImageFileIDs,
-								StopSent:          true,
+								StopSent:          false,
 								Continue: &ContinueInfo{
 									ConversationID: convId,
 									ParentID:       assistantMessageID,
@@ -374,8 +375,15 @@ readLoop:
 				}
 				if writeStream {
 					outChunk := *streamEvent.chunk
+					willContinue := streamEvent.isStop && max_tokens && convId != "" && assistantMessageID != ""
 					if len(outChunk.Choices) > 0 {
 						outChunk.Choices[0].Delta.Content = deltaText
+						if willContinue {
+							// A continuation follows immediately. Do not advertise a
+							// terminal finish_reason to OpenAI clients yet, or they will
+							// stop reading before the remaining text arrives.
+							outChunk.Choices[0].FinishReason = nil
+						}
 						if streamEvent.role == "" || !isRole {
 							outChunk.Choices[0].Delta.Role = ""
 						}
@@ -386,7 +394,7 @@ readLoop:
 					shouldWrite := deltaText != "" ||
 						(streamEvent.role != "" && isRole) ||
 						streamEvent.chunk.Sentinel != nil ||
-						streamEvent.isStop
+						(streamEvent.isStop && !willContinue)
 					if shouldWrite {
 						c.Writer.WriteString("data: " + outChunk.String() + "\n\n")
 						c.Writer.Flush()
@@ -411,7 +419,7 @@ readLoop:
 							SandboxArtifacts:  artifactState.SandboxArtifacts,
 							PDFArtifacts:      artifactState.PDFArtifacts,
 							GeneratedImageIDs: artifactState.ImageFileIDs,
-							StopSent:          true,
+							StopSent:          false,
 							Continue: &ContinueInfo{
 								ConversationID: convId,
 								ParentID:       assistantMessageID,
@@ -469,7 +477,7 @@ readLoop:
 			if (original_response.Message.Metadata.MessageType != "next" && original_response.Message.Metadata.MessageType != "continue" && activeChannel != "final") || !strings.HasSuffix(original_response.Message.Content.ContentType, "text") {
 				continue
 			}
-			if original_response.Message.EndTurn != nil {
+			if isEndTurn(original_response.Message.EndTurn) {
 				isEnd = true
 			}
 			if len(original_response.Message.Metadata.Citations) != 0 {
@@ -538,6 +546,11 @@ readLoop:
 			}
 		endProcess:
 			isRole = false
+			if original_response.Message.Metadata.FinishDetails != nil {
+				finish_reason = original_response.Message.Metadata.FinishDetails.Type
+				max_tokens = isTokenLimitFinish(finish_reason)
+			}
+			willContinue := isEnd && max_tokens && convId != "" && assistantMessageID != ""
 			if options.OnTextDelta != nil {
 				if delta := chatCompletionDelta(response_string); delta != "" {
 					options.OnTextDelta(delta)
@@ -551,19 +564,30 @@ readLoop:
 				c.Writer.Flush()
 			}
 
-			if original_response.Message.Metadata.FinishDetails != nil {
-				if original_response.Message.Metadata.FinishDetails.Type == "max_tokens" {
-					max_tokens = true
-				}
-				finish_reason = original_response.Message.Metadata.FinishDetails.Type
-			}
 			if isEnd {
-				if writeStream {
+				if writeStream && !willContinue {
 					final_line := official_types.StopChunkWithConversation(finish_reason, model, convId)
 					c.Writer.WriteString("data: " + final_line.String() + "\n\n")
 					c.Writer.Flush()
 				}
 				finalizeArtifacts()
+				if willContinue {
+					return HandlerResult{
+						Text:              visibleText(),
+						ThinkingText:      thinkingText,
+						ConversationID:    convId,
+						ParentMessageID:   assistantMessageID,
+						Sentinel:          sentinel,
+						ArtifactSignals:   artifactState.Signals,
+						SandboxArtifacts:  artifactState.SandboxArtifacts,
+						PDFArtifacts:      artifactState.PDFArtifacts,
+						GeneratedImageIDs: artifactState.ImageFileIDs,
+						Continue: &ContinueInfo{
+							ConversationID: convId,
+							ParentID:       assistantMessageID,
+						},
+					}
+				}
 				return HandlerResult{
 					Text:              visibleText(),
 					ThinkingText:      thinkingText,
@@ -613,6 +637,23 @@ readLoop:
 			ParentID:       original_response.Message.ID,
 		},
 	}
+}
+
+func isTokenLimitFinish(reason string) bool {
+	switch strings.ToLower(strings.TrimSpace(reason)) {
+	case "length", "max_tokens", "max_completion_tokens", "token_limit":
+		return true
+	default:
+		return false
+	}
+}
+
+// isEndTurn only treats an explicit true as terminal. ChatGPT's upstream
+// stream can include end_turn:false on intermediate snapshots; treating any
+// non-nil value as terminal cuts the answer off at that snapshot.
+func isEndTurn(value interface{}) bool {
+	ended, ok := value.(bool)
+	return ok && ended
 }
 
 // chatCompletionDelta extracts a text delta from the legacy stream format

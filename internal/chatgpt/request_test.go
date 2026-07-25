@@ -920,6 +920,55 @@ func TestHandlerSeparatesAnalysisAndFinalChannels(t *testing.T) {
 	}
 }
 
+func TestHandlerDefersTerminalChunkUntilAutoContinuationCompletes(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	body := strings.Join([]string{
+		`data: {"v":{"conversation_id":"conv-limit","message":{"id":"msg-limit","author":{"role":"assistant"},"channel":"final","content":{"content_type":"text","parts":["first part"]},"metadata":{"message_type":"next","finish_details":{"type":"max_tokens"}},"recipient":"all","end_turn":true}}}`,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+	response := &http.Response{Body: io.NopCloser(strings.NewReader(body))}
+	writer := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(writer)
+
+	result := HandlerDetailed(c, response, nil, nil, "request-id", chatGPTRequestForTest(), true, "auto")
+
+	if result.Continue == nil || result.Continue.ConversationID != "conv-limit" || result.Continue.ParentID != "msg-limit" {
+		t.Fatalf("continue = %#v, want continuation metadata", result.Continue)
+	}
+	if result.StopSent {
+		t.Fatalf("StopSent = true, want false until continuation is exhausted")
+	}
+	if strings.Contains(writer.Body.String(), `"finish_reason":"max_tokens"`) {
+		t.Fatalf("intermediate max-token stop leaked to client: %s", writer.Body.String())
+	}
+	if !strings.Contains(writer.Body.String(), `"content":"first part"`) {
+		t.Fatalf("content was not streamed before continuation: %s", writer.Body.String())
+	}
+}
+
+func TestHandlerDoesNotEndOnFalseEndTurnSnapshot(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	body := strings.Join([]string{
+		`data: {"v":{"conversation_id":"conv-false-end","message":{"id":"msg-false-end","author":{"role":"assistant"},"channel":"final","content":{"content_type":"text","parts":["first "]},"metadata":{"message_type":"next"},"recipient":"all","end_turn":false}}}`,
+		`data: {"v":{"conversation_id":"conv-false-end","message":{"id":"msg-false-end","author":{"role":"assistant"},"channel":"final","content":{"content_type":"text","parts":["first second"]},"metadata":{"message_type":"next","finish_details":{"type":"stop"}},"recipient":"all","end_turn":true}}}`,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+	response := &http.Response{Body: io.NopCloser(strings.NewReader(body))}
+	writer := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(writer)
+
+	result := HandlerDetailed(c, response, nil, nil, "request-id", chatGPTRequestForTest(), true, "auto")
+
+	if result.Text != "first second" {
+		t.Fatalf("text = %q, want complete answer", result.Text)
+	}
+	if !strings.Contains(writer.Body.String(), `"content":"second"`) {
+		t.Fatalf("stream lost text after end_turn:false: %s", writer.Body.String())
+	}
+}
+
 func TestHandlerAppliesBatchPatch(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	body := strings.Join([]string{
