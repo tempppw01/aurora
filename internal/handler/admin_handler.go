@@ -69,6 +69,22 @@ type apiKeyRequest struct {
 	APIKey string `json:"api_key"`
 }
 
+// accountExport is a portable, intentionally credential-bearing backup. It is
+// exposed only by the separately authorized management API and must never be
+// returned from the normal account listing endpoint.
+type accountExport struct {
+	Format     string                   `json:"format"`
+	Version    int                      `json:"version"`
+	ExportedAt string                   `json:"exported_at"`
+	Accounts   []exportedManagedAccount `json:"accounts"`
+}
+
+type exportedManagedAccount struct {
+	Source string `json:"source"`
+	Token  string `json:"token"`
+	TeamID string `json:"team_id,omitempty"`
+}
+
 // AdminHandler exposes the local account files through a deliberately
 // separate, token-protected management API.
 type AdminHandler struct {
@@ -145,6 +161,40 @@ func (h *AdminHandler) ListAccounts(c *gin.Context) {
 		}
 	}
 	c.JSON(http.StatusOK, gin.H{"data": result})
+}
+
+// ExportAccounts downloads every persisted account credential as a JSON
+// backup. The records retain source and Team ID so a restore can retain each
+// account's original type. This endpoint deliberately requires
+// the same ADMIN_TOKEN protection as every other management action.
+func (h *AdminHandler) ExportAccounts(c *gin.Context) {
+	accountFileMu.Lock()
+	defer accountFileMu.Unlock()
+
+	now := time.Now().UTC()
+	backup := accountExport{
+		Format:     "aurora-account-export",
+		Version:    1,
+		ExportedAt: now.Format(time.RFC3339),
+		Accounts:   make([]exportedManagedAccount, 0),
+	}
+	for _, source := range []string{"access", "session", "refresh", "free"} {
+		for _, entry := range accounts.LoadTokensFromFile(h.files[source]) {
+			backup.Accounts = append(backup.Accounts, exportedManagedAccount{
+				Source: source,
+				Token:  entry.Token,
+				TeamID: entry.TeamID,
+			})
+		}
+	}
+
+	filename := "aurora-accounts-" + now.Format("20060102T150405Z") + ".json"
+	c.Header("Content-Type", "application/json; charset=utf-8")
+	c.Header("Content-Disposition", `attachment; filename="`+filename+`"`)
+	c.Header("Cache-Control", "no-store")
+	c.Header("Pragma", "no-cache")
+	c.Header("X-Content-Type-Options", "nosniff")
+	c.JSON(http.StatusOK, backup)
 }
 
 // CheckAccountHealth performs the same Sentinel authentication preparation as

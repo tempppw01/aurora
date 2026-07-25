@@ -30,6 +30,7 @@ func TestAdminHandlerAddsListsAndDeletesFreeAccount(t *testing.T) {
 	router := gin.New()
 	admin := router.Group("/admin/api").Use(h.Authorize)
 	admin.GET("/accounts", h.ListAccounts)
+	admin.GET("/accounts/export", h.ExportAccounts)
 	admin.POST("/accounts", h.AddAccount)
 	admin.DELETE("/accounts/:source/:id", h.DeleteAccount)
 
@@ -62,6 +63,30 @@ func TestAdminHandlerAddsListsAndDeletesFreeAccount(t *testing.T) {
 	}
 	if listed.Data[0].Token == credential {
 		t.Fatal("management API returned an unmasked credential")
+	}
+
+	request = httptest.NewRequest(http.MethodGet, "/admin/api/accounts/export", nil)
+	request.Header.Set("Authorization", "Bearer admin-secret")
+	response = httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("export status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if response.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("export cache control = %q", response.Header().Get("Cache-Control"))
+	}
+	if response.Header().Get("Content-Disposition") == "" {
+		t.Fatal("export must download as an attachment")
+	}
+	var exported accountExport
+	if err := json.Unmarshal(response.Body.Bytes(), &exported); err != nil {
+		t.Fatalf("decode export: %v", err)
+	}
+	if exported.Format != "aurora-account-export" || exported.Version != 1 || len(exported.Accounts) != 1 {
+		t.Fatalf("unexpected export: %#v", exported)
+	}
+	if exported.Accounts[0].Source != "free" || exported.Accounts[0].Token != credential {
+		t.Fatalf("export did not preserve credential: %#v", exported.Accounts[0])
 	}
 
 	request = httptest.NewRequest(http.MethodDelete, "/admin/api/accounts/free/"+listed.Data[0].ID, nil)

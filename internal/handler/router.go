@@ -68,6 +68,7 @@ func RegisterRouter(accountPool *accounts.Pool, cfg *config.Config) *gin.Engine 
 
 	adminGroup := router.Group("/admin/api").Use(adminHandler.Authorize)
 	adminGroup.GET("/accounts", adminHandler.ListAccounts)
+	adminGroup.GET("/accounts/export", adminHandler.ExportAccounts)
 	adminGroup.POST("/accounts", adminHandler.AddAccount)
 	adminGroup.DELETE("/accounts/:source/:id", adminHandler.DeleteAccount)
 	adminGroup.POST("/accounts/:source/:id/health", adminHandler.CheckAccountHealth)
