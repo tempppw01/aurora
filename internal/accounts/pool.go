@@ -16,11 +16,11 @@ var ErrNoAvailable = errors.New("no available account of the requested type")
 // Pool 账号池管理，按类型分三个数组，Acquire 直接取无需遍历
 // 临时账号存放在单独的 map[string]*Account 中,以 token hash 为 key
 type Pool struct {
-	mu       sync.Mutex
-	noauth   []*Account
-	free     []*Account
-	puid     []*Account
-	cursors  [3]int // 0=noauth,1=free,2=puid
+	mu      sync.Mutex
+	noauth  []*Account
+	free    []*Account
+	puid    []*Account
+	cursors [3]int // 0=noauth,1=free,2=puid
 
 	// 临时账号 (外部传入的 accessToken 创建的)
 	tempMu    sync.RWMutex
@@ -77,6 +77,38 @@ func (p *Pool) AddAccount(acct *Account) {
 	case TypePUID:
 		p.puid = append(p.puid, acct)
 	}
+}
+
+// RemoveAccountByCredential removes persistent accounts that were created from
+// a token, refresh token, or session token. It deliberately does not touch
+// temporary accounts created from client-supplied access tokens.
+func (p *Pool) RemoveAccountByCredential(credential string) int {
+	if credential == "" {
+		return 0
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	removed := 0
+	removeFrom := func(entries []*Account) []*Account {
+		kept := entries[:0]
+		for _, acct := range entries {
+			if acct != nil && (acct.Token == credential || acct.RefreshToken == credential || acct.SessionToken == credential) {
+				removed++
+				continue
+			}
+			kept = append(kept, acct)
+		}
+		return kept
+	}
+	p.noauth = removeFrom(p.noauth)
+	p.free = removeFrom(p.free)
+	p.puid = removeFrom(p.puid)
+	for i := range p.cursors {
+		p.cursors[i] = 0
+	}
+	return removed
 }
 
 // Acquire 从对应类型数组中轮询获取一个可用账号
@@ -195,9 +227,9 @@ func (p *Pool) GetOrCreateTempAccount(token, userAgent string, proxyURL string) 
 
 	// 2) 没命中,创建一个
 	fp := BrowserFingerprint{
-		OaiDeviceID:  uuid.NewString(),
-		OaiSessionID: uuid.NewString(),
-		UserAgent:    userAgent,
+		OaiDeviceID:         uuid.NewString(),
+		OaiSessionID:        uuid.NewString(),
+		UserAgent:           userAgent,
 		ScreenWidth:         1920,
 		ScreenHeight:        1080,
 		HardwareConcurrency: 8,

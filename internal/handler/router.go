@@ -25,6 +25,7 @@ func RegisterRouter(accountPool *accounts.Pool, cfg *config.Config) *gin.Engine 
 	audioHandler := NewAudioHandler(accountPool, cfg)
 	authHandler := NewAuthHandler(accountPool)
 	modelsHandler := NewModelsHandler()
+	adminHandler := NewAdminHandler(accountPool, cfg)
 
 	// 初始化基础前置参数（DPL、BasicCookies 等）
 	proxyUrl := ""
@@ -36,6 +37,7 @@ func RegisterRouter(accountPool *accounts.Pool, cfg *config.Config) *gin.Engine 
 
 	router.GET("/", func(c *gin.Context) { c.JSON(200, gin.H{"message": "Hello, world!"}) })
 	router.GET("/ping", func(c *gin.Context) { c.JSON(200, gin.H{"message": "pong"}) })
+	router.GET("/admin", adminHandler.Page)
 
 	router.POST("/auth/session", authHandler.Session)
 	router.POST("/auth/refresh", authHandler.Refresh)
@@ -63,6 +65,11 @@ func RegisterRouter(accountPool *accounts.Pool, cfg *config.Config) *gin.Engine 
 	authGroup.POST("/v1/audio/speech", audioHandler.TTS)
 	authGroup.POST("/v1/audio/transcriptions", audioHandler.Transcriptions)
 	authGroup.POST("/v1/audio/translations", audioHandler.Translations)
+
+	adminGroup := router.Group("/admin/api").Use(adminHandler.Authorize)
+	adminGroup.GET("/accounts", adminHandler.ListAccounts)
+	adminGroup.POST("/accounts", adminHandler.AddAccount)
+	adminGroup.DELETE("/accounts/:source/:id", adminHandler.DeleteAccount)
 
 	return router
 }

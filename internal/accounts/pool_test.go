@@ -76,3 +76,27 @@ func TestPoolReleaseUpdatesStats(t *testing.T) {
 		t.Errorf("FailedCalls = %d, want 0", got.FailedCalls)
 	}
 }
+
+func TestPoolRemoveAccountByCredential(t *testing.T) {
+	pool := NewPool(nil)
+	access := NewAccount("access", TypeFree, "access-token")
+	refresh := NewAccount("refresh", TypeFree, "current-access")
+	refresh.RefreshToken = "refresh-token"
+	other := NewAccount("other", TypeNoAuth, "other-token")
+	access.Status = StatusActive
+	refresh.Status = StatusActive
+	other.Status = StatusActive
+	pool.AddAccount(access)
+	pool.AddAccount(refresh)
+	pool.AddAccount(other)
+
+	if removed := pool.RemoveAccountByCredential("refresh-token"); removed != 1 {
+		t.Fatalf("removed = %d, want 1", removed)
+	}
+	if got, err := pool.Acquire(TypeFree); err != nil || got != access {
+		t.Fatalf("remaining free = %v, %v; want access, nil", got, err)
+	}
+	if got, err := pool.Acquire(TypeNoAuth); err != nil || got != other {
+		t.Fatalf("remaining noauth = %v, %v; want other, nil", got, err)
+	}
+}

@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Aurora 管理台</title>
+  <style>
+    :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, sans-serif; background:#0c1222; color:#eaf0ff; }
+    * { box-sizing: border-box; } body { margin:0; min-height:100vh; background:radial-gradient(circle at top right,#1c315f 0,transparent 35%),#0c1222; }
+    main { max-width:1080px; margin:0 auto; padding:46px 22px 70px; } h1 { margin:0; font-size:30px; } .sub { color:#9baac6; margin:8px 0 28px; }
+    .grid { display:grid; grid-template-columns: 370px 1fr; gap:18px; } .card { background:rgba(19,29,53,.9); border:1px solid #263858; border-radius:14px; padding:20px; box-shadow:0 15px 36px #05091466; }
+    h2 { margin:0 0 16px; font-size:18px; } label { display:block; font-size:13px; color:#bac8e0; margin:13px 0 6px; } input,select,textarea,button { width:100%; border-radius:8px; border:1px solid #385071; background:#101b32; color:#f4f7ff; padding:10px 11px; font:inherit; } textarea { resize:vertical; min-height:92px; }
+    button { cursor:pointer; border:0; background:#497ff5; font-weight:650; margin-top:17px; } button:hover { background:#5b8dff; } .danger { width:auto; margin:0; padding:7px 10px; color:#ffd6dc; background:#452035; } .danger:hover { background:#642845; }
+    .auth { display:flex; gap:8px; margin-bottom:18px; } .auth input { flex:1; } .auth button { width:auto; margin:0; padding:0 16px; } .hint, #notice { color:#9baac6; font-size:13px; line-height:1.5; } #notice { min-height:20px; margin-top:12px; } #notice.error { color:#ff9aaa; } #notice.ok { color:#86e4b0; }
+    table { width:100%; border-collapse:collapse; font-size:14px; } th,td { text-align:left; padding:11px 8px; border-bottom:1px solid #263858; } th { color:#9baac6; font-size:12px; font-weight:600; } code { color:#bed2ff; } .empty { color:#9baac6; text-align:center; padding:35px; } @media(max-width:780px){ .grid{grid-template-columns:1fr;} main{padding-top:28px;} .card{overflow:auto;} }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Aurora 管理台</h1>
+  <p class="sub">管理本机账号池。新增和删除会立即应用到运行中的服务，并持久化到 token 文件。</p>
+  <div class="auth"><input id="adminToken" type="password" placeholder="ADMIN_TOKEN（仅保存在当前浏览器会话）"><button onclick="connect()">连接</button></div>
+  <div class="grid">
+    <section class="card">
+      <h2>添加账号</h2>
+      <label for="source">账号类型</label>
+      <select id="source"><option value="access">Access Token</option><option value="refresh">Refresh Token</option><option value="session">Session Token</option><option value="free">免费 UUID 设备号</option></select>
+      <label for="credential">Token / UUID</label><textarea id="credential" placeholder="粘贴一条 token 或 UUID"></textarea>
+      <label for="team">Team Account ID（可选）</label><input id="team" placeholder="仅团队账号需要">
+      <button onclick="addAccount()">添加到账号池</button>
+      <p class="hint">Refresh/Session token 无法立即兑换时仍会保存，并由后台续期任务后续尝试激活。</p>
+      <div id="notice"></div>
+    </section>
+    <section class="card">
+      <h2>已保存账号</h2>
+      <div id="accounts" class="empty">输入管理密钥后加载。</div>
+    </section>
+  </div>
+</main>
+<script>
+  let token = sessionStorage.getItem('aurora-admin-token') || '';
+  document.getElementById('adminToken').value = token;
+  const notice = (msg, type='') => { const el=document.getElementById('notice'); el.textContent=msg; el.className=type; };
+  async function request(path, options={}) { const headers={...(options.headers||{}), Authorization:'Bearer '+token}; const res=await fetch(path,{...options,headers}); if(!res.ok){let data={};try{data=await res.json()}catch{} throw new Error(data.error?.message||data.error||('请求失败 ('+res.status+')'));} return res.status===204?null:res.json(); }
+  async function connect(){ token=document.getElementById('adminToken').value.trim(); if(!token){notice('请输入 ADMIN_TOKEN。','error');return;} try{await loadAccounts();sessionStorage.setItem('aurora-admin-token',token);notice('已连接。','ok');}catch(e){notice(e.message,'error');} }
+  async function loadAccounts(){ const data=await request('/admin/api/accounts'); const rows=data.data||[]; const el=document.getElementById('accounts'); if(!rows.length){el.className='empty';el.textContent='暂无已保存账号。';return;} el.className=''; el.innerHTML='<table><thead><tr><th>类型</th><th>Token</th><th>团队 ID</th><th></th></tr></thead><tbody>'+rows.map(a=>`<tr><td>${escapeHtml(a.source)}</td><td><code>${escapeHtml(a.token)}</code></td><td>${escapeHtml(a.team_id||'—')}</td><td><button class="danger" onclick="removeAccount('${a.source}','${a.id}')">删除</button></td></tr>`).join('')+'</tbody></table>'; }
+  async function addAccount(){ if(!token){notice('请先连接管理台。','error');return;} const source=document.getElementById('source').value, credential=document.getElementById('credential').value.trim(), team_id=document.getElementById('team').value.trim(); if(!credential){notice('请输入 token。','error');return;} try{const r=await request('/admin/api/accounts',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source,token:credential,team_id})}); document.getElementById('credential').value='';document.getElementById('team').value='';notice(r.status==='active'?'账号已添加并激活。':'账号已保存，等待后台续期激活。','ok');await loadAccounts();}catch(e){notice(e.message,'error');} }
+  async function removeAccount(source,id){ if(!confirm('确认删除该账号？此操作会立即停止它在账号池中的使用。'))return; try{await request('/admin/api/accounts/'+encodeURIComponent(source)+'/'+encodeURIComponent(id),{method:'DELETE'});notice('账号已删除。','ok');await loadAccounts();}catch(e){notice(e.message,'error');} }
+  function escapeHtml(v){const d=document.createElement('div');d.textContent=v;return d.innerHTML;}
+  if(token) connect();
+</script>
+</body>
+</html>

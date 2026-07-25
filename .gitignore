@@ -26,5 +26,5 @@ docs/
 *.js
 .superpowers/
 *.html
+!internal/handler/admin.html
 _third_party/
-

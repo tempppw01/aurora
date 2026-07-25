@@ -77,6 +77,8 @@ PORT=8080
 
 # 鉴权
 Authorization=your_authorization
+# 管理页面（/admin）；未设置时回退使用 Authorization，建议单独设置
+ADMIN_TOKEN=your_admin_token
 
 # 免费账号
 FREE_ACCOUNTS=true
@@ -116,6 +118,7 @@ ENABLE_EXTERNAL_TOKEN=true
 
 - `SERVER_HOST` / `SERVER_PORT`：服务监听地址和端口。`PORT` 为 `SERVER_PORT` 的 fallback。
 - `Authorization`：服务访问 key。配置后，请求头需携带 `Authorization: Bearer your_authorization`。
+- `ADMIN_TOKEN`：管理页面 API 的专用密钥。访问 `/admin` 后填入该密钥；未设置时回退使用 `Authorization`。两者都未设置时，账号管理 API 会拒绝请求，避免暴露 token。
 - `FREE_ACCOUNTS`：是否自动生成免费 UUID 账号，默认关闭。
 - `FREE_ACCOUNTS_NUM`：自动生成免费 UUID 账号数量，默认 1024。
 - `TLS_CERT` / `TLS_KEY`：同时配置时启用 HTTPS。
