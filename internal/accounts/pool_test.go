@@ -100,3 +100,16 @@ func TestPoolRemoveAccountByCredential(t *testing.T) {
 		t.Fatalf("remaining noauth = %v, %v; want other, nil", got, err)
 	}
 }
+
+func TestPoolFindByCredential(t *testing.T) {
+	pool := NewPool(nil)
+	acct := NewAccount("session", TypeFree, "access-token")
+	acct.SessionToken = "session-token"
+	pool.AddAccount(acct)
+	if got := pool.FindByCredential("session-token"); got != acct {
+		t.Fatalf("FindByCredential() = %v, want %v", got, acct)
+	}
+	if got := pool.FindByCredential("missing"); got != nil {
+		t.Fatalf("FindByCredential(missing) = %v, want nil", got)
+	}
+}

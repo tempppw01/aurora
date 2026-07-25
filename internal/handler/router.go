@@ -70,6 +70,7 @@ func RegisterRouter(accountPool *accounts.Pool, cfg *config.Config) *gin.Engine 
 	adminGroup.GET("/accounts", adminHandler.ListAccounts)
 	adminGroup.POST("/accounts", adminHandler.AddAccount)
 	adminGroup.DELETE("/accounts/:source/:id", adminHandler.DeleteAccount)
+	adminGroup.POST("/accounts/:source/:id/health", adminHandler.CheckAccountHealth)
 	adminGroup.GET("/settings/api-key", adminHandler.GetAPIKey)
 	adminGroup.PUT("/settings/api-key", adminHandler.UpdateAPIKey)
 

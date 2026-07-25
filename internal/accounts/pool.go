@@ -111,6 +111,25 @@ func (p *Pool) RemoveAccountByCredential(credential string) int {
 	return removed
 }
 
+// FindByCredential returns a persistent account without advancing the pool's
+// round-robin cursor. It is used by management operations such as a manual
+// health check.
+func (p *Pool) FindByCredential(credential string) *Account {
+	if credential == "" {
+		return nil
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, entries := range [][]*Account{p.noauth, p.free, p.puid} {
+		for _, acct := range entries {
+			if acct != nil && (acct.Token == credential || acct.RefreshToken == credential || acct.SessionToken == credential) {
+				return acct
+			}
+		}
+	}
+	return nil
+}
+
 // Acquire 从对应类型数组中轮询获取一个可用账号
 func (p *Pool) Acquire(acctType AccountType) (*Account, error) {
 	p.mu.Lock()

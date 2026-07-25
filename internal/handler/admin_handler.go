@@ -36,6 +36,8 @@ type managedAccount struct {
 	Email      string `json:"email,omitempty"`
 	ImportedAt string `json:"imported_at,omitempty"`
 	Status     string `json:"status,omitempty"`
+	Health     string `json:"health,omitempty"`
+	CheckedAt  string `json:"checked_at,omitempty"`
 }
 
 type addManagedAccountRequest struct {
@@ -59,6 +61,8 @@ type accountMetadata struct {
 	Email      string `json:"email,omitempty"`
 	ImportedAt string `json:"imported_at"`
 	Status     string `json:"status"`
+	Health     string `json:"health,omitempty"`
+	CheckedAt  string `json:"checked_at,omitempty"`
 }
 
 type apiKeyRequest struct {
@@ -135,10 +139,77 @@ func (h *AdminHandler) ListAccounts(c *gin.Context) {
 				Email:      email,
 				ImportedAt: meta.ImportedAt,
 				Status:     meta.Status,
+				Health:     meta.Health,
+				CheckedAt:  meta.CheckedAt,
 			})
 		}
 	}
 	c.JSON(http.StatusOK, gin.H{"data": result})
+}
+
+// CheckAccountHealth performs the same Sentinel authentication preparation as
+// a request, without creating a conversation or sending user content.
+func (h *AdminHandler) CheckAccountHealth(c *gin.Context) {
+	source := strings.ToLower(strings.TrimSpace(c.Param("source")))
+	id := strings.TrimSpace(c.Param("id"))
+	path, ok := h.files[source]
+	if !ok || id == "" {
+		respondError(c, http.StatusBadRequest, errors.New("invalid account reference"))
+		return
+	}
+
+	accountFileMu.Lock()
+	var credential string
+	for _, entry := range accounts.LoadTokensFromFile(path) {
+		if managedAccountID(source, entry.Token) == id {
+			credential = entry.Token
+			break
+		}
+	}
+	accountFileMu.Unlock()
+	if credential == "" {
+		respondError(c, http.StatusNotFound, errors.New("account not found"))
+		return
+	}
+
+	acct := h.pool.FindByCredential(credential)
+	if acct == nil {
+		respondError(c, http.StatusConflict, errors.New("account is not loaded; restart the service and try again"))
+		return
+	}
+	if acct.Client == nil {
+		if err := acct.InitClient(); err != nil {
+			respondError(c, http.StatusInternalServerError, fmt.Errorf("initialize account client: %w", err))
+			return
+		}
+	}
+
+	checkedAt := time.Now().UTC().Format(time.RFC3339)
+	_, status, err := chatgpt.InitSentinel(acct.Client, acct, acct.Proxy, 0)
+	alive := err == nil
+	health := "healthy"
+	message := "Sentinel authentication succeeded"
+	if !alive {
+		health = "unhealthy"
+		message = err.Error()
+		if status == http.StatusUnauthorized {
+			h.pool.ReportFailure(acct)
+		}
+	}
+
+	accountFileMu.Lock()
+	metadata := h.loadMetadata()
+	meta := metadata[id]
+	meta.Health = health
+	meta.CheckedAt = checkedAt
+	metadata[id] = meta
+	metadataErr := h.saveMetadata(metadata)
+	accountFileMu.Unlock()
+	if metadataErr != nil {
+		respondError(c, http.StatusInternalServerError, fmt.Errorf("health check finished but result could not be saved: %w", metadataErr))
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"alive": alive, "status": status, "health": health, "checked_at": checkedAt, "message": message})
 }
 
 func (h *AdminHandler) AddAccount(c *gin.Context) {
