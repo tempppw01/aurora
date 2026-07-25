@@ -87,3 +87,29 @@ func TestAdminHandlerRequiresConfiguredToken(t *testing.T) {
 		t.Fatalf("status = %d, want %d", response.Code, http.StatusServiceUnavailable)
 	}
 }
+
+func TestNormalizeManagedAccountRequest(t *testing.T) {
+	request, detected, err := normalizeManagedAccountRequest(addManagedAccountRequest{
+		Source: "auto",
+		Token:  `{"accessToken":"eyJ.demo.token","sessionToken":"session-cookie"}`,
+	})
+	if err != nil {
+		t.Fatalf("normalize bundle: %v", err)
+	}
+	if request.Source != "session" || request.Token != "session-cookie" || detected != "session" {
+		t.Fatalf("bundle normalized to %#v, %q", request, detected)
+	}
+
+	request, detected, err = normalizeManagedAccountRequest(addManagedAccountRequest{
+		Source: "auto",
+		Token:  "9ca8b1b6-707f-4c1b-a1e0-d007839ae597",
+	})
+	if err != nil || request.Source != "free" || detected != "free" {
+		t.Fatalf("UUID normalized to %#v, %q, %v", request, detected, err)
+	}
+
+	_, _, err = normalizeManagedAccountRequest(addManagedAccountRequest{Source: "auto", Token: "opaque-token"})
+	if err == nil {
+		t.Fatal("expected opaque auto-detection to require manual selection")
+	}
+}

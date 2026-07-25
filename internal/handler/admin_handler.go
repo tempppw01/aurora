@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	_ "embed"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -36,6 +37,11 @@ type addManagedAccountRequest struct {
 	Source string `json:"source"`
 	Token  string `json:"token"`
 	TeamID string `json:"team_id"`
+}
+
+type credentialBundle struct {
+	AccessToken  string `json:"accessToken"`
+	SessionToken string `json:"sessionToken"`
 }
 
 // AdminHandler exposes the local account files through a deliberately
@@ -108,9 +114,13 @@ func (h *AdminHandler) AddAccount(c *gin.Context) {
 		respondError(c, http.StatusBadRequest, errors.New("request must be proper JSON"))
 		return
 	}
-	req.Source = strings.ToLower(strings.TrimSpace(req.Source))
-	req.Token = strings.TrimSpace(req.Token)
-	req.TeamID = strings.TrimSpace(req.TeamID)
+	var detectedAs string
+	var err error
+	req, detectedAs, err = normalizeManagedAccountRequest(req)
+	if err != nil {
+		respondError(c, http.StatusBadRequest, err)
+		return
+	}
 	if _, ok := h.files[req.Source]; !ok || req.Token == "" {
 		respondError(c, http.StatusBadRequest, errors.New("source must be access, refresh, session, or free; token is required"))
 		return
@@ -143,9 +153,67 @@ func (h *AdminHandler) AddAccount(c *gin.Context) {
 	}
 	h.pool.AddAccount(acct)
 	c.JSON(http.StatusCreated, gin.H{
-		"data":   managedAccount{ID: managedAccountID(req.Source, req.Token), Source: req.Source, Token: maskCredential(req.Token), TeamID: req.TeamID},
-		"status": state,
+		"data":        managedAccount{ID: managedAccountID(req.Source, req.Token), Source: req.Source, Token: maskCredential(req.Token), TeamID: req.TeamID},
+		"status":      state,
+		"detected_as": detectedAs,
 	})
+}
+
+// normalizeManagedAccountRequest supports the management page's automatic
+// detection while keeping the server authoritative. Full ChatGPT auth exports
+// can contain both accessToken and sessionToken; the session token is preferred
+// because it can be renewed by the existing background health check.
+func normalizeManagedAccountRequest(req addManagedAccountRequest) (addManagedAccountRequest, string, error) {
+	req.Source = strings.ToLower(strings.TrimSpace(req.Source))
+	req.Token = strings.TrimSpace(req.Token)
+	req.TeamID = strings.TrimSpace(req.TeamID)
+	if req.Token == "" {
+		return req, "", errors.New("token is required")
+	}
+
+	if strings.HasPrefix(req.Token, "{") {
+		var bundle credentialBundle
+		if err := json.Unmarshal([]byte(req.Token), &bundle); err != nil {
+			return req, "", errors.New("credential JSON is invalid")
+		}
+		bundle.AccessToken = strings.TrimSpace(bundle.AccessToken)
+		bundle.SessionToken = strings.TrimSpace(bundle.SessionToken)
+		if bundle.AccessToken == "" && bundle.SessionToken == "" {
+			return req, "", errors.New("credential JSON does not contain accessToken or sessionToken")
+		}
+		if req.Source == "access" && bundle.AccessToken != "" {
+			req.Token = bundle.AccessToken
+			return req, "access", nil
+		}
+		if req.Source == "session" && bundle.SessionToken != "" {
+			req.Token = bundle.SessionToken
+			return req, "session", nil
+		}
+		if req.Source != "auto" {
+			return req, "", errors.New("credential JSON only supports access or session import")
+		}
+		if bundle.SessionToken != "" {
+			req.Source = "session"
+			req.Token = bundle.SessionToken
+			return req, "session", nil
+		}
+		req.Source = "access"
+		req.Token = bundle.AccessToken
+		return req, "access", nil
+	}
+
+	if req.Source != "auto" {
+		return req, req.Source, nil
+	}
+	if _, err := uuid.Parse(req.Token); err == nil {
+		req.Source = "free"
+		return req, "free", nil
+	}
+	if strings.HasPrefix(req.Token, "eyJ") && strings.Count(req.Token, ".") == 2 {
+		req.Source = "access"
+		return req, "access", nil
+	}
+	return req, "", errors.New("unable to distinguish this opaque token; choose refresh or session manually")
 }
 
 func (h *AdminHandler) DeleteAccount(c *gin.Context) {
