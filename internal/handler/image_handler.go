@@ -15,6 +15,7 @@ import (
 	"aurora/internal/accounts"
 	"aurora/internal/chatgpt"
 	"aurora/internal/config"
+	"aurora/internal/imageflow"
 	officialtypes "aurora/typings/official"
 
 	"github.com/gin-gonic/gin"
@@ -121,6 +122,40 @@ func isStreamTrue(v string) bool {
 	return false
 }
 
+// imagePromptWithPreferences turns OpenAI image options into an explicit
+// upstream instruction. ChatGPT's web conversation endpoint has no native
+// size/quality fields, so this is intentionally best-effort rather than a
+// claim that the dimensions can be enforced server-side.
+func imagePromptWithPreferences(prompt, size, quality string) (string, error) {
+	size = strings.ToLower(strings.TrimSpace(size))
+	quality = strings.ToLower(strings.TrimSpace(quality))
+	if size != "" && size != "auto" {
+		switch size {
+		case "256x256", "512x512", "1024x1024", "1536x1024", "1024x1536", "1792x1024", "1024x1792":
+		default:
+			return "", fmt.Errorf("unsupported image size: %s", size)
+		}
+	}
+	if quality != "" && quality != "auto" {
+		switch quality {
+		case "standard", "hd", "low", "medium", "high":
+		default:
+			return "", fmt.Errorf("unsupported image quality: %s", quality)
+		}
+	}
+	if size == "" && quality == "" {
+		return prompt, nil
+	}
+	var preferences []string
+	if size != "" && size != "auto" {
+		preferences = append(preferences, "requested canvas size: "+size)
+	}
+	if quality != "" && quality != "auto" {
+		preferences = append(preferences, "requested image quality: "+quality)
+	}
+	return prompt + "\n\n[Rendering preferences: " + strings.Join(preferences, "; ") + ". Follow these when the image model supports them.]", nil
+}
+
 // ─── /v1/images/generations ──────────────────────────────────────
 
 func (h *ImageHandler) Generations(c *gin.Context) {
@@ -149,6 +184,20 @@ func (h *ImageHandler) Generations(c *gin.Context) {
 	}
 	if imageRequest.N > 10 {
 		imageRequest.N = 10
+	}
+	upstreamPrompt, err := imagePromptWithPreferences(imageRequest.Prompt, imageRequest.Size, imageRequest.Quality)
+	if err != nil {
+		param := "size"
+		if strings.Contains(err.Error(), "quality") {
+			param = "quality"
+		}
+		c.JSON(400, gin.H{"error": gin.H{
+			"message": err.Error(),
+			"type":    "invalid_request_error",
+			"param":   param,
+			"code":    "invalid_image_parameter",
+		}})
+		return
 	}
 	if imageRequest.ResponseFormat == "" {
 		imageRequest.ResponseFormat = "b64_json"
@@ -208,7 +257,7 @@ func (h *ImageHandler) Generations(c *gin.Context) {
 				ProgressText: fmt.Sprintf("Generating image %d/%d ...", i+1, imageRequest.N),
 			})
 		}
-		imageResults, upstreamText, err := chatgpt.GeneratePictureConversationImages(client, account, turnStile, imageRequest.Prompt, imageRequest.Model, proxyUrl)
+		imageResults, upstreamText, err := chatgpt.GeneratePictureConversationImages(client, account, turnStile, upstreamPrompt, imageRequest.Model, proxyUrl)
 		if err != nil {
 			if stream {
 				writeImageStreamEvent(c, "image.generation.error", gin.H{
@@ -363,9 +412,9 @@ func normalizeImageEditImages(rawImages []interface{}) []editImageInput {
 			if err != nil {
 				continue
 			}
-			data, err := io.ReadAll(f)
+			data, err := io.ReadAll(io.LimitReader(f, imageflow.MaxImageBytes+1))
 			f.Close()
-			if err != nil || len(data) == 0 {
+			if err != nil || len(data) == 0 || int64(len(data)) > imageflow.MaxImageBytes {
 				continue
 			}
 			ct := v.Header.Get("Content-Type")
@@ -392,6 +441,9 @@ func imageEditReadJSONImage(data []byte, filename, contentType string) (editImag
 	if len(data) == 0 {
 		return editImageInput{}, fmt.Errorf("image data is empty")
 	}
+	if int64(len(data)) > imageflow.MaxImageBytes {
+		return editImageInput{}, fmt.Errorf("image exceeds the %d MiB limit", imageflow.MaxImageBytes>>20)
+	}
 	if filename == "" {
 		filename = "image.png"
 	}
@@ -401,99 +453,12 @@ func imageEditReadJSONImage(data []byte, filename, contentType string) (editImag
 	return editImageInput{Data: data, Filename: filename, ContentType: contentType}, nil
 }
 
-func imageEditDecodeDataURL(url string) (editImageInput, error) {
-	comma := strings.Index(url, ",")
-	if comma < 0 {
-		return editImageInput{}, fmt.Errorf("invalid data URL")
-	}
-	header := url[:comma]
-	payload := url[comma+1:]
-	contentType := "image/png"
-	if semi := strings.Index(header, ";"); semi > 5 {
-		contentType = header[5:semi]
-		if !strings.HasPrefix(contentType, "image/") {
-			return editImageInput{}, fmt.Errorf("data URL must be an image, got %q", contentType)
-		}
-	}
-	dec := base64.StdEncoding
-	if strings.Contains(header, ";base64") {
-		dec = base64.StdEncoding
-	} else {
-		dec = base64.URLEncoding
-	}
-	raw, err := dec.DecodeString(payload)
-	if err != nil {
-		raw, err = base64.StdEncoding.DecodeString(payload)
-		if err != nil {
-			return editImageInput{}, err
-		}
-		contentType = "image/png"
-	}
-	ext := "png"
-	switch strings.ToLower(contentType) {
-	case "image/jpeg":
-		ext = "jpg"
-	case "image/gif":
-		ext = "gif"
-	case "image/webp":
-		ext = "webp"
-	}
-	return imageEditReadJSONImage(raw, "image_url."+ext, contentType)
-}
-
-func imageEditDownloadHTTPURL(client httpclient.AuroraHttpClient, url string) (editImageInput, error) {
-	if client == nil {
-		client = bogdanfinn.NewStdClient()
-	}
-	headers := httpclient.AuroraHeaders{
-		"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-		"Accept":     "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
-	}
-	resp, err := client.Request(httpclient.GET, url, headers, nil, nil)
-	if err != nil {
-		return editImageInput{}, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return editImageInput{}, fmt.Errorf("download image failed: status %d", resp.StatusCode)
-	}
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return editImageInput{}, err
-	}
-	contentType := resp.Header.Get("Content-Type")
-	if contentType == "" {
-		contentType = http.DetectContentType(data)
-	}
-	filename := "image_url"
-	if idx := strings.LastIndex(url, "/"); idx >= 0 && idx < len(url)-1 {
-		filename = url[idx+1:]
-	}
-	if dot := strings.Index(filename, "?"); dot >= 0 {
-		filename = filename[:dot]
-	}
-	if filename == "" {
-		filename = "image_url.png"
-	}
-	return imageEditReadJSONImage(data, filename, contentType)
-}
-
 func imageEditConvertURL(client httpclient.AuroraHttpClient, raw string) (editImageInput, bool, error) {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return editImageInput{}, false, nil
+	item, ok, err := imageflow.NormalizeImageURL(client, raw)
+	if err != nil || !ok {
+		return editImageInput{}, ok, err
 	}
-	if strings.HasPrefix(raw, "data:") {
-		item, err := imageEditDecodeDataURL(raw)
-		return item, true, err
-	}
-	if strings.HasPrefix(raw, "http://") || strings.HasPrefix(raw, "https://") {
-		item, err := imageEditDownloadHTTPURL(client, raw)
-		return item, true, err
-	}
-	// 非 URL、非 data URL:当 base64 处理
-	item, err := imageEditReadJSONImage([]byte(raw), "image.png", "image/png")
-	return item, true, err
+	return editImageInput{Data: item.Data, Filename: item.Filename, ContentType: item.ContentType}, true, nil
 }
 
 func resolveEditImageSources(c *gin.Context, body map[string]interface{}, client httpclient.AuroraHttpClient) ([]editImageInput, error) {
@@ -665,13 +630,14 @@ func (h *ImageHandler) runImageEditFlow(c *gin.Context, asVariation bool) {
 	contentType = strings.ToLower(strings.TrimSpace(contentType))
 
 	var imageSources []editImageInput
-	var prompt, model, responseFormat string
+	var prompt, model, responseFormat, size string
 	var n int
 	var stream bool
 
-	parseFormFields := func(promptVal, modelVal, nVal, responseFormatVal, streamVal string) {
+	parseFormFields := func(promptVal, modelVal, nVal, sizeVal, responseFormatVal, streamVal string) {
 		prompt = strings.TrimSpace(promptVal)
 		model = strings.TrimSpace(modelVal)
+		size = strings.TrimSpace(sizeVal)
 		responseFormat = strings.TrimSpace(responseFormatVal)
 		if nVal != "" {
 			if v, err := strconv.Atoi(nVal); err == nil {
@@ -707,6 +673,7 @@ func (h *ImageHandler) runImageEditFlow(c *gin.Context, asVariation bool) {
 		}
 		prompt = strings.TrimSpace(body.Prompt)
 		model = body.Model
+		size = body.Size
 		n = body.N
 		responseFormat = body.ResponseFormat
 		stream = body.Stream
@@ -806,6 +773,7 @@ func (h *ImageHandler) runImageEditFlow(c *gin.Context, asVariation bool) {
 			strings.TrimSpace(c.PostForm("prompt")),
 			strings.TrimSpace(c.PostForm("model")),
 			c.PostForm("n"),
+			strings.TrimSpace(c.PostForm("size")),
 			strings.TrimSpace(c.PostForm("response_format")),
 			c.PostForm("stream"),
 		)
@@ -850,6 +818,16 @@ func (h *ImageHandler) runImageEditFlow(c *gin.Context, asVariation bool) {
 			"type":    "invalid_request_error",
 			"param":   "prompt",
 			"code":    "missing_required_parameter",
+		}})
+		return
+	}
+	upstreamPrompt, err := imagePromptWithPreferences(prompt, size, "")
+	if err != nil {
+		c.JSON(400, gin.H{"error": gin.H{
+			"message": err.Error(),
+			"type":    "invalid_request_error",
+			"param":   "size",
+			"code":    "invalid_image_parameter",
 		}})
 		return
 	}
@@ -961,7 +939,7 @@ func (h *ImageHandler) runImageEditFlow(c *gin.Context, asVariation bool) {
 				ProgressText: fmt.Sprintf("Generating image %d/%d ...", i+1, n),
 			})
 		}
-		imageResults, upstreamText, err := chatgpt.GeneratePictureConversationImagesWithReferences(client, account, turnStile, prompt, model, proxyUrl, references)
+		imageResults, upstreamText, err := chatgpt.GeneratePictureConversationImagesWithReferences(client, account, turnStile, upstreamPrompt, model, proxyUrl, references)
 		if err != nil {
 			if stream {
 				writeImageStreamEvent(c, "image.generation.error", gin.H{

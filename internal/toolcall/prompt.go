@@ -42,6 +42,8 @@ func BuildInstructions(tools []official.Tool, toolChoice *official.ToolChoice) s
 	sb.WriteString("6. DO NOT use your internal/native Python tool, Advanced Data Analysis, or Code Interpreter. They run in a remote sandbox on your servers and have NO access to the user's workspace. You MUST use ONLY the custom tools listed under TOOLS AVAILABLE (like 'glob', 'read', 'grep', or 'bash').\n")
 	if forced := toolChoice.ForcedFunctionName(); forced != "" {
 		fmt.Fprintf(&sb, "\nCRITICAL: You MUST call the tool %q in this response. Do not call any other tool, and do not produce a final answer without calling it first.\n", forced)
+	} else if toolChoice != nil && toolChoice.Type == "any" {
+		sb.WriteString("\nCRITICAL: You MUST call at least one available tool in this response. Do not produce a final answer without emitting a valid <tool_call> block first.\n")
 	} else if toolChoice != nil && toolChoice.IsForcedNone() {
 		sb.WriteString("\nCRITICAL: The user has DISABLED tool calling in this request. Do not emit any <tool_call> blocks. Just answer in plain text.\n")
 	}

@@ -234,6 +234,36 @@ func TestHandlerStreamsConcatenatedOpenAIChunks(t *testing.T) {
 	}
 }
 
+func TestHandlerDetailedCallbacksTextDeltasWithoutChatSSE(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	body := strings.Join([]string{
+		`data: {"choices":[{"delta":{"content":"first"}}]}`,
+		`data: {"choices":[{"delta":{"content":" second"}}]}`,
+		`data: {"choices":[{"delta":{},"finish_reason":"stop"}],"conversation_id":"conv-responses"}`,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+	response := &http.Response{Body: io.NopCloser(strings.NewReader(body))}
+	writer := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(writer)
+	var deltas []string
+
+	result := HandlerDetailedWithOptions(c, response, nil, nil, "request-id", chatGPTRequestForTest(), true, "auto", HandlerDetailedOptions{
+		SuppressStreamOutput: true,
+		OnTextDelta:          func(delta string) { deltas = append(deltas, delta) },
+	})
+
+	if got := strings.Join(deltas, ""); got != "first second" {
+		t.Fatalf("deltas = %q, want %q", got, "first second")
+	}
+	if result.Text != "first second" {
+		t.Fatalf("text = %q, want accumulated text", result.Text)
+	}
+	if writer.Body.Len() != 0 {
+		t.Fatalf("chat SSE should be suppressed, got %q", writer.Body.String())
+	}
+}
+
 func TestStreamHandoffTopicFromPayload(t *testing.T) {
 	payload := `{"type":"stream_handoff","options":[{"type":"subscribe_ws_topic","topic_id":"conversation-turn-abc"}]}`
 	topicID, skip := sseparser.HandoffTopicFromPayload(payload, "")

@@ -3,15 +3,22 @@ package imageflow
 import (
 	"aurora/httpclient"
 	"aurora/httpclient/bogdanfinn"
-	"aurora/internal/chatgpt"
 	"aurora/internal/accounts"
+	"aurora/internal/chatgpt"
 	"encoding/base64"
 	"fmt"
 	"io"
 	"mime/multipart"
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
 )
+
+// MaxImageBytes bounds every user-supplied image before it is uploaded to the
+// upstream service. Keeping the limit here makes URL, data URL and multipart
+// inputs follow the same rule.
+const MaxImageBytes int64 = 20 << 20
 
 // ImageSource 表示一张待处理的源图。
 type ImageSource struct {
@@ -149,6 +156,9 @@ func decodeDataURL(url string) (ImageSource, bool, error) {
 			return ImageSource{}, false, err
 		}
 	}
+	if int64(len(raw)) > MaxImageBytes {
+		return ImageSource{}, false, fmt.Errorf("image exceeds the %d MiB limit", MaxImageBytes>>20)
+	}
 	ext := "png"
 	switch strings.ToLower(contentType) {
 	case "image/jpeg":
@@ -161,7 +171,11 @@ func decodeDataURL(url string) (ImageSource, bool, error) {
 	return ImageSource{Data: raw, Filename: "image_url." + ext, ContentType: contentType}, true, nil
 }
 
-func downloadHTTPURL(client httpclient.AuroraHttpClient, url string) (ImageSource, bool, error) {
+func downloadHTTPURL(client httpclient.AuroraHttpClient, rawURL string) (ImageSource, bool, error) {
+	parsedURL, err := validateRemoteImageURL(rawURL)
+	if err != nil {
+		return ImageSource{}, false, err
+	}
 	if client == nil {
 		client = bogdanfinn.NewStdClient()
 	}
@@ -169,7 +183,7 @@ func downloadHTTPURL(client httpclient.AuroraHttpClient, url string) (ImageSourc
 		"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
 		"Accept":     "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
 	}
-	resp, err := client.Request(httpclient.GET, url, headers, nil, nil)
+	resp, err := client.Request(httpclient.GET, parsedURL.String(), headers, nil, nil)
 	if err != nil {
 		return ImageSource{}, false, err
 	}
@@ -177,7 +191,10 @@ func downloadHTTPURL(client httpclient.AuroraHttpClient, url string) (ImageSourc
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return ImageSource{}, false, fmt.Errorf("download image failed: status %d", resp.StatusCode)
 	}
-	data, err := io.ReadAll(resp.Body)
+	if resp.ContentLength > MaxImageBytes {
+		return ImageSource{}, false, fmt.Errorf("image exceeds the %d MiB limit", MaxImageBytes>>20)
+	}
+	data, err := readImageBody(resp.Body)
 	if err != nil {
 		return ImageSource{}, false, err
 	}
@@ -186,8 +203,8 @@ func downloadHTTPURL(client httpclient.AuroraHttpClient, url string) (ImageSourc
 		contentType = http.DetectContentType(data)
 	}
 	filename := "image_url"
-	if idx := strings.LastIndex(url, "/"); idx >= 0 && idx < len(url)-1 {
-		filename = url[idx+1:]
+	if idx := strings.LastIndex(parsedURL.Path, "/"); idx >= 0 && idx < len(parsedURL.Path)-1 {
+		filename = parsedURL.Path[idx+1:]
 	}
 	if dot := strings.Index(filename, "?"); dot >= 0 {
 		filename = filename[:dot]
@@ -196,6 +213,51 @@ func downloadHTTPURL(client httpclient.AuroraHttpClient, url string) (ImageSourc
 		filename = "image_url.png"
 	}
 	return ImageSource{Data: data, Filename: filename, ContentType: contentType}, true, nil
+}
+
+func readImageBody(body io.Reader) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(body, MaxImageBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > MaxImageBytes {
+		return nil, fmt.Errorf("image exceeds the %d MiB limit", MaxImageBytes>>20)
+	}
+	return data, nil
+}
+
+func validateRemoteImageURL(rawURL string) (*url.URL, error) {
+	u, err := url.Parse(rawURL)
+	if err != nil || u == nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" {
+		return nil, fmt.Errorf("image URL must be an absolute http(s) URL")
+	}
+	host := strings.ToLower(u.Hostname())
+	if host == "localhost" || strings.HasSuffix(host, ".localhost") || strings.HasSuffix(host, ".local") {
+		return nil, fmt.Errorf("image URL points to a local address")
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if isPrivateAddress(ip) {
+			return nil, fmt.Errorf("image URL points to a private address")
+		}
+		return u, nil
+	}
+	ips, err := net.LookupIP(host)
+	if err != nil {
+		return nil, fmt.Errorf("unable to resolve image URL host: %w", err)
+	}
+	if len(ips) == 0 {
+		return nil, fmt.Errorf("image URL host has no public address")
+	}
+	for _, ip := range ips {
+		if isPrivateAddress(ip) {
+			return nil, fmt.Errorf("image URL host resolves to a private address")
+		}
+	}
+	return u, nil
+}
+
+func isPrivateAddress(ip net.IP) bool {
+	return ip.IsLoopback() || ip.IsUnspecified() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast()
 }
 
 // ── Multipart / JSON 图片输入归一化 ──
@@ -213,7 +275,7 @@ func NormalizeMultipartImages(rawImages []interface{}) []ImageSource {
 			if err != nil {
 				continue
 			}
-			data, err := io.ReadAll(f)
+			data, err := readImageBody(f)
 			f.Close()
 			if err != nil || len(data) == 0 {
 				continue

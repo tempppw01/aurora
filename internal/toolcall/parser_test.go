@@ -375,6 +375,17 @@ func TestBuildInstructionsForcedNone(t *testing.T) {
 	}
 }
 
+func TestBuildInstructionsForcedAny(t *testing.T) {
+	tools := []official.Tool{
+		{Type: "function", Function: official.ToolFunction{Name: "bash"}},
+	}
+	choice := &official.ToolChoice{Type: "any"}
+	got := BuildInstructions(tools, choice)
+	if !strings.Contains(got, "MUST call at least one available tool") {
+		t.Fatalf("missing any-warning: %s", got)
+	}
+}
+
 func TestFirstToolCallExamplePicksBash(t *testing.T) {
 	tools := []official.Tool{
 		{Type: "function", Function: official.ToolFunction{Name: "glob"}},

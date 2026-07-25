@@ -133,6 +133,11 @@ type HandlerDetailedOptions struct {
 	ArtifactDelivery string
 	ProxyURL         string
 	Tools            []official_types.Tool
+	// SuppressStreamOutput keeps parsing an upstream stream but leaves writing
+	// to the caller. It is used by /v1/responses, whose SSE event shape differs
+	// from Chat Completions.
+	SuppressStreamOutput bool
+	OnTextDelta          func(string)
 }
 
 // HandlerDetailedWithOptions 处理对话响应流（最完整版）。
@@ -145,6 +150,7 @@ func HandlerDetailedWithOptions(c *gin.Context, response *http.Response, client 
 		options.ClientState.ApplyToRequest(&translated_request)
 	}
 	max_tokens := false
+	writeStream := stream && !options.SuppressStreamOutput
 
 	reader := bufio.NewReader(response.Body)
 	if stream && client != nil && account != nil {
@@ -192,7 +198,7 @@ func HandlerDetailedWithOptions(c *gin.Context, response *http.Response, client 
 			return
 		}
 		sentinel = append(sentinel, items...)
-		if !stream {
+		if !writeStream {
 			return
 		}
 		for _, item := range items {
@@ -232,7 +238,7 @@ func HandlerDetailedWithOptions(c *gin.Context, response *http.Response, client 
 			"kind":  "analysis",
 			"delta": delta,
 		}})
-		if stream {
+		if writeStream {
 			reasoningChunk := official_types.NewReasoningChunk(delta, model)
 			if convId != "" {
 				reasoningChunk.ConversationID = convId
@@ -322,7 +328,7 @@ readLoop:
 				if activeChannel == "analysis" {
 					emitThinking(streamEvent.text)
 					if streamEvent.isStop {
-						if stream {
+						if writeStream {
 							finalLine := official_types.StopChunkWithConversation(finish_reason, model, convId)
 							c.Writer.WriteString("data: " + finalLine.String() + "\n\n")
 							c.Writer.Flush()
@@ -363,7 +369,10 @@ readLoop:
 					currentEvent = ""
 					continue
 				}
-				if stream {
+				if deltaText != "" && options.OnTextDelta != nil {
+					options.OnTextDelta(deltaText)
+				}
+				if writeStream {
 					outChunk := *streamEvent.chunk
 					if len(outChunk.Choices) > 0 {
 						outChunk.Choices[0].Delta.Content = deltaText
@@ -529,7 +538,12 @@ readLoop:
 			}
 		endProcess:
 			isRole = false
-			if stream {
+			if options.OnTextDelta != nil {
+				if delta := chatCompletionDelta(response_string); delta != "" {
+					options.OnTextDelta(delta)
+				}
+			}
+			if writeStream {
 				_, err = c.Writer.WriteString(response_string)
 				if err != nil {
 					return HandlerResult{}
@@ -544,7 +558,7 @@ readLoop:
 				finish_reason = original_response.Message.Metadata.FinishDetails.Type
 			}
 			if isEnd {
-				if stream {
+				if writeStream {
 					final_line := official_types.StopChunkWithConversation(finish_reason, model, convId)
 					c.Writer.WriteString("data: " + final_line.String() + "\n\n")
 					c.Writer.Flush()
@@ -560,7 +574,7 @@ readLoop:
 					SandboxArtifacts:  artifactState.SandboxArtifacts,
 					PDFArtifacts:      artifactState.PDFArtifacts,
 					GeneratedImageIDs: artifactState.ImageFileIDs,
-					StopSent:          stream,
+					StopSent:          writeStream,
 				}
 			}
 			currentEvent = ""
@@ -599,4 +613,16 @@ readLoop:
 			ParentID:       original_response.Message.ID,
 		},
 	}
+}
+
+// chatCompletionDelta extracts a text delta from the legacy stream format
+// produced by ConvertToString. It intentionally ignores role-only and stop
+// chunks, which do not map to a Responses output_text delta.
+func chatCompletionDelta(responseString string) string {
+	payload := strings.TrimSpace(strings.TrimPrefix(responseString, "data: "))
+	var chunk official_types.ChatCompletionChunk
+	if err := json.Unmarshal([]byte(payload), &chunk); err != nil || len(chunk.Choices) == 0 {
+		return ""
+	}
+	return chunk.Choices[0].Delta.Content
 }

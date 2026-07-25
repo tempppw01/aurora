@@ -3,10 +3,11 @@ package handler
 import (
 	"fmt"
 	"io"
-"net/http"
+	"net/http"
 	"os"
 	"time"
 
+	chatgptrequestconverter "aurora/conversion/requests/chatgpt"
 	"aurora/httpclient/bogdanfinn"
 	"aurora/internal/accounts"
 	"aurora/internal/chatgpt"
@@ -15,7 +16,6 @@ import (
 	chatgpt_types "aurora/typings/chatgpt"
 	officialtypes "aurora/typings/official"
 	"aurora/util"
-	chatgptrequestconverter "aurora/conversion/requests/chatgpt"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -88,7 +88,11 @@ func (h *ChatHandler) Nightmare(c *gin.Context) {
 
 	// 工具调用模式判定
 	toolsEnabled := toolCallingEnabled(original_request.Tools, h.cfg)
+	toolStream := toolsEnabled && original_request.Stream && h.cfg.StreamMode
 	if toolsEnabled && h.cfg.StreamMode {
+		// Tool-call tags must be fully parsed before they can be emitted as
+		// OpenAI deltas, so keep the upstream request buffered while preserving
+		// the caller's SSE contract below.
 		original_request.Stream = false
 	}
 
@@ -113,7 +117,7 @@ func (h *ChatHandler) Nightmare(c *gin.Context) {
 
 	// 工具调用提前分支
 	if toolsEnabled {
-		h.handleToolCalling(c, &original_request, &client, account, &clientState, &reqModel, &uid, &proxyUrl, &input_tokens)
+		h.handleToolCalling(c, &original_request, &client, account, &clientState, &reqModel, &uid, &proxyUrl, &input_tokens, toolStream)
 		return
 	}
 
@@ -320,7 +324,8 @@ func (h *ChatHandler) Responses(c *gin.Context) {
 		reqModel = "auto"
 	}
 
-	response, wsConn, _, status, err := conversationClientOrder(&client, account, translated_request, proxyUrl, false, clientState, h.accountPool)
+	streamResponses := responsesRequest.Stream && h.cfg.StreamMode
+	response, wsConn, _, status, err := conversationClientOrder(&client, account, translated_request, proxyUrl, streamResponses, clientState, h.accountPool)
 	if err != nil {
 		c.JSON(status, gin.H{"error": gin.H{
 			"message": err.Error(),
@@ -338,14 +343,26 @@ func (h *ChatHandler) Responses(c *gin.Context) {
 		}
 		return
 	}
+	if streamResponses {
+		c.Writer.Header().Set("Content-Type", "text/event-stream")
+		c.Writer.Header().Set("Cache-Control", "no-cache")
+		c.Writer.Header().Set("Connection", "keep-alive")
+		c.Writer.Header().Set("X-Accel-Buffering", "no")
+		c.Writer.WriteHeader(200)
+		writeResponsesStreamEvent(c, "response.created", officialtypes.ResponsesCreated(officialtypes.NewResponsesResponse("", input_tokens, 0, reqModel)))
+	}
 
 	var full_response string
 	for i := h.cfg.MaxContinueCount; i > 0; i-- {
 		var continue_info *chatgpt.ContinueInfo
 		var response_part string
-		result := chatgpt.HandlerDetailedWithOptions(c, response, client, account, uid, translated_request, false, reqModel, chatgpt.HandlerDetailedOptions{
-			Websocket:   wsConn,
-			ClientState: clientState,
+		result := chatgpt.HandlerDetailedWithOptions(c, response, client, account, uid, translated_request, streamResponses, reqModel, chatgpt.HandlerDetailedOptions{
+			Websocket:            wsConn,
+			ClientState:          clientState,
+			SuppressStreamOutput: streamResponses,
+			OnTextDelta: func(delta string) {
+				writeResponsesStreamEvent(c, "response.output_text.delta", officialtypes.ResponsesTextDelta(delta))
+			},
 		})
 		wsConn = nil
 		response_part, continue_info = result.Text, result.Continue
@@ -366,8 +383,13 @@ func (h *ChatHandler) Responses(c *gin.Context) {
 		translated_request.ConversationID = continue_info.ConversationID
 		translated_request.ParentMessageID = continue_info.ParentID
 
-		response, wsConn, _, status, err = conversationClientOrder(&client, account, translated_request, proxyUrl, false, clientState, h.accountPool)
+		response, wsConn, _, status, err = conversationClientOrder(&client, account, translated_request, proxyUrl, streamResponses, clientState, h.accountPool)
 		if err != nil {
+			if streamResponses {
+				writeResponsesStreamEvent(c, "error", fmt.Sprintf(`{"error":{"message":%q,"type":"request_conversion_error"}}`, err.Error()))
+				writeResponsesStreamDone(c)
+				return
+			}
 			c.JSON(status, gin.H{"error": gin.H{
 				"message": err.Error(),
 				"type":    "request_conversion_error",
@@ -382,6 +404,9 @@ func (h *ChatHandler) Responses(c *gin.Context) {
 				wsConn.Close()
 				wsConn = nil
 			}
+			if streamResponses {
+				writeResponsesStreamDone(c)
+			}
 			return
 		}
 	}
@@ -391,18 +416,24 @@ func (h *ChatHandler) Responses(c *gin.Context) {
 
 	output_tokens := util.CountToken(full_response)
 	responsesResponse := officialtypes.NewResponsesResponse(full_response, input_tokens, output_tokens, reqModel)
-	if !responsesRequest.Stream || !h.cfg.StreamMode {
+	if !streamResponses {
 		c.JSON(200, responsesResponse)
 		return
 	}
 
-	c.Writer.Header().Set("Content-Type", "text/event-stream")
-	c.Writer.Header().Set("Cache-Control", "no-cache")
-	c.Writer.Header().Set("Connection", "keep-alive")
-	c.String(200, "event: response.created\ndata: "+officialtypes.ResponsesCreated(responsesResponse)+"\n\n")
-	c.String(200, "event: response.output_text.delta\ndata: "+officialtypes.ResponsesTextDelta(full_response)+"\n\n")
-	c.String(200, "event: response.completed\ndata: "+officialtypes.ResponsesCompleted(responsesResponse)+"\n\n")
-	c.String(200, "data: [DONE]\n\n")
+	writeResponsesStreamEvent(c, "response.completed", officialtypes.ResponsesCompleted(responsesResponse))
+	writeResponsesStreamDone(c)
+}
+
+func writeResponsesStreamEvent(c *gin.Context, event, data string) {
+	_, _ = c.Writer.WriteString("event: " + event + "\n")
+	_, _ = c.Writer.WriteString("data: " + data + "\n\n")
+	c.Writer.Flush()
+}
+
+func writeResponsesStreamDone(c *gin.Context) {
+	_, _ = c.Writer.WriteString("data: [DONE]\n\n")
+	c.Writer.Flush()
 }
 
 func (h *ChatHandler) Files(c *gin.Context) {
@@ -479,7 +510,7 @@ func (h *ChatHandler) Files(c *gin.Context) {
 }
 
 // handleToolCalling 工具调用模式的主流程（对齐 initialize/handlers.go:handleToolCalling）
-func (h *ChatHandler) handleToolCalling(c *gin.Context, originalRequest *officialtypes.APIRequest, client **bogdanfinn.TlsClient, account *accounts.Account, clientState **chatgpt.ChatClientState, reqModel *string, uid *string, proxyUrl *string, inputTokens *int) {
+func (h *ChatHandler) handleToolCalling(c *gin.Context, originalRequest *officialtypes.APIRequest, client **bogdanfinn.TlsClient, account *accounts.Account, clientState **chatgpt.ChatClientState, reqModel *string, uid *string, proxyUrl *string, inputTokens *int, stream bool) {
 	if account == nil || !account.Type.Satisfies(accounts.CapToolCalling) {
 		c.JSON(403, gin.H{"error": "Tool calling requires a logged-in ChatGPT account."})
 		return
@@ -554,6 +585,9 @@ func (h *ChatHandler) handleToolCalling(c *gin.Context, originalRequest *officia
 		for i := range calls {
 			calls[i].Index = i
 		}
+		if originalRequest.ParallelToolCalls != nil && !*originalRequest.ParallelToolCalls && len(calls) > 1 {
+			calls = calls[:1]
+		}
 		if logPath := h.cfg.DebugToolLog; logPath != "" {
 			appendToolDebugLog(logPath, attempt, result.Text, calls)
 		}
@@ -570,6 +604,10 @@ func (h *ChatHandler) handleToolCalling(c *gin.Context, originalRequest *officia
 	}
 
 	if len(lastToolCalls) > 0 {
+		if stream {
+			writeToolCallStream(c, *reqModel, lastConversationID, lastToolCalls)
+			return
+		}
 		c.JSON(200, officialtypes.NewChatCompletionWithToolCalls(
 			lastText, "", lastToolCalls,
 			*inputTokens, util.CountToken(lastText),
@@ -577,8 +615,48 @@ func (h *ChatHandler) handleToolCalling(c *gin.Context, originalRequest *officia
 		))
 		return
 	}
+	if stream {
+		writeTextStream(c, *reqModel, lastConversationID, lastText)
+		return
+	}
 	outputTokens := util.CountToken(lastText)
 	c.JSON(200, officialtypes.NewChatCompletionWithMetadata(lastText, *inputTokens, outputTokens, *reqModel, lastConversationID, lastSentinel))
+}
+
+func writeToolCallStream(c *gin.Context, model, conversationID string, calls []officialtypes.ToolCall) {
+	writeChatCompletionStreamHeader(c)
+	roleChunk := officialtypes.NewChatCompletionChunk("", model)
+	roleChunk.Choices[0].Delta.Role = "assistant"
+	writeChatCompletionStreamChunk(c, roleChunk)
+	for _, deltas := range toolcall.StreamToToolCallDeltas(calls) {
+		writeChatCompletionStreamChunk(c, officialtypes.NewToolCallChunk(model, deltas...))
+	}
+	writeChatCompletionStreamChunk(c, officialtypes.NewToolCallStopChunk(model, conversationID))
+	writeChatCompletionStreamDone(c, true, model, conversationID)
+}
+
+func writeTextStream(c *gin.Context, model, conversationID, text string) {
+	writeChatCompletionStreamHeader(c)
+	roleChunk := officialtypes.NewChatCompletionChunk("", model)
+	roleChunk.Choices[0].Delta.Role = "assistant"
+	writeChatCompletionStreamChunk(c, roleChunk)
+	if text != "" {
+		writeChatCompletionStreamChunk(c, officialtypes.NewChatCompletionChunk(text, model))
+	}
+	writeChatCompletionStreamChunk(c, officialtypes.StopChunkWithConversation("stop", model, conversationID))
+	writeChatCompletionStreamDone(c, true, model, conversationID)
+}
+
+func writeChatCompletionStreamHeader(c *gin.Context) {
+	c.Writer.Header().Set("Content-Type", "text/event-stream")
+	c.Writer.Header().Set("Cache-Control", "no-cache")
+	c.Writer.Header().Set("Connection", "keep-alive")
+	c.Writer.Header().Set("X-Accel-Buffering", "no")
+}
+
+func writeChatCompletionStreamChunk(c *gin.Context, chunk officialtypes.ChatCompletionChunk) {
+	_, _ = c.Writer.WriteString("data: " + chunk.String() + "\n\n")
+	c.Writer.Flush()
 }
 
 func (h *ChatHandler) ChatGPTConversation(c *gin.Context) {
