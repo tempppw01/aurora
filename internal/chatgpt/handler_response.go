@@ -170,7 +170,6 @@ func HandlerDetailedWithOptions(c *gin.Context, response *http.Response, client 
 	var previous_text typings.StringStruct
 	var original_response chatgpt_types.ChatGPTResponse
 	var isRole = true
-	var waitSource = false
 	var isEnd = false
 	var imgSource []string
 	var convId string
@@ -462,20 +461,10 @@ readLoop:
 				continue
 			}
 			if original_response.Message.EndTurn != nil {
-				if waitSource {
-					waitSource = false
-				}
 				isEnd = true
 			}
 			if len(original_response.Message.Metadata.Citations) != 0 {
 				r := []rune(original_response.Message.Content.Parts[0].(string))
-				if waitSource {
-					if string(r[len(r)-1:]) == "】" {
-						waitSource = false
-					} else {
-						continue
-					}
-				}
 				offset := 0
 				for _, citation := range original_response.Message.Metadata.Citations {
 					rl := len(r)
@@ -492,8 +481,6 @@ readLoop:
 					r = []rune(original_response.Message.Content.Parts[0].(string))
 					offset += len(r) - rl
 				}
-			} else if waitSource {
-				continue
 			}
 			response_string := ""
 			if original_response.Message.Recipient != "all" {
@@ -535,7 +522,9 @@ readLoop:
 				}
 			}
 			if response_string == "【" {
-				waitSource = true
+				// The legacy web stream emits this as a source-loading sentinel.
+				// It is not user-visible content; importantly, do not pause the
+				// following text while waiting for citation metadata.
 				continue
 			}
 		endProcess:

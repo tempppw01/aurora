@@ -84,6 +84,35 @@ func TestHandlerStreamsPatchEvents(t *testing.T) {
 	}
 }
 
+func TestHandlerDoesNotDropTextAfterLegacySourcePlaceholder(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	body := strings.Join([]string{
+		`data: {"p":"/message/content/parts/0","o":"append","v":"1. 第一项"}`,
+		`data: {"p":"/message/content/parts/0","o":"append","v":"【"}`,
+		`data: {"p":"/message/content/parts/0","o":"append","v":"\n2. 第二项"}`,
+		`data: {"p":"/message/end_turn","o":"replace","v":true}`,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+	response := &http.Response{Body: io.NopCloser(strings.NewReader(body))}
+	writer := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(writer)
+
+	full, continueInfo := Handler(c, response, nil, nil, "request-id", chatGPTRequestForTest(), true, "auto")
+
+	if continueInfo != nil {
+		t.Fatalf("continueInfo = %#v, want nil", continueInfo)
+	}
+	if !strings.Contains(full, "1. 第一项") || !strings.Contains(full, "2. 第二项") {
+		t.Fatalf("full response lost text after source placeholder: %q", full)
+	}
+	output := writer.Body.String()
+	if !strings.Contains(output, `"content":"1. 第一项"`) || !strings.Contains(output, `"content":"\n2. 第二项"`) {
+		t.Fatalf("stream output lost ordered list items: %s", output)
+	}
+}
+
 func TestHandlerStreamsOpenAIChunksAndSentinel(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
