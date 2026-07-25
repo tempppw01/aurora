@@ -183,3 +183,53 @@ func TestEmailFromCredential(t *testing.T) {
 		t.Fatalf("email = %q", email)
 	}
 }
+
+func TestAdminHandlerPreservesEmailFromCredentialBundle(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	h := NewAdminHandler(accounts.NewPool(nil), &config.Config{AdminToken: "admin-secret"})
+	dir := t.TempDir()
+	h.files = map[string]string{
+		"access":  filepath.Join(dir, "access_tokens.txt"),
+		"refresh": filepath.Join(dir, "refresh_tokens.txt"),
+		"session": filepath.Join(dir, "session_tokens.txt"),
+		"free":    filepath.Join(dir, "free_tokens.txt"),
+	}
+	h.metadataPath = filepath.Join(dir, "account_metadata.json")
+	router := gin.New()
+	router.POST("/accounts", h.Authorize, h.AddAccount)
+
+	body := bytes.NewBufferString(`{"source":"access","token":"{\"accessToken\":\"access-token\",\"user\":{\"email\":\"person@example.test\"}}"}`)
+	request := httptest.NewRequest(http.MethodPost, "/accounts", body)
+	request.Header.Set("Authorization", "Bearer admin-secret")
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("POST status = %d, body = %s", response.Code, response.Body.String())
+	}
+	var created struct {
+		Data managedAccount `json:"data"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if created.Data.Email != "person@example.test" {
+		t.Fatalf("email = %q", created.Data.Email)
+	}
+
+	request = httptest.NewRequest(http.MethodPost, "/accounts", bytes.NewBufferString(`{"source":"access","token":"{\"accessToken\":\"access-token\",\"user\":{\"email\":\"updated@example.test\"}}"}`))
+	request.Header.Set("Authorization", "Bearer admin-secret")
+	request.Header.Set("Content-Type", "application/json")
+	response = httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("repeat POST status = %d, body = %s", response.Code, response.Body.String())
+	}
+	var repaired struct {
+		Data          managedAccount `json:"data"`
+		AlreadyExists bool           `json:"already_exists"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &repaired); err != nil || !repaired.AlreadyExists || repaired.Data.Email != "updated@example.test" {
+		t.Fatalf("repair response = %s, err = %v", response.Body.String(), err)
+	}
+}

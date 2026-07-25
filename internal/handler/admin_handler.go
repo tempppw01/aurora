@@ -353,6 +353,24 @@ func (h *AdminHandler) AddAccount(c *gin.Context) {
 	path := h.files[req.Source]
 	for _, existing := range accounts.LoadTokensFromFile(path) {
 		if existing.Token == req.Token {
+			if email != "" {
+				id := managedAccountID(req.Source, req.Token)
+				metadata := h.loadMetadata()
+				meta := metadata[id]
+				meta.Email = email
+				metadata[id] = meta
+				if err := h.saveMetadata(metadata); err != nil {
+					respondError(c, http.StatusInternalServerError, fmt.Errorf("account exists but email metadata could not be saved: %w", err))
+					return
+				}
+				c.JSON(http.StatusOK, gin.H{
+					"data":           managedAccount{ID: id, Source: req.Source, Token: maskCredential(req.Token), TeamID: existing.TeamID, Email: email, ImportedAt: meta.ImportedAt, Status: meta.Status},
+					"status":         meta.Status,
+					"detected_as":    detectedAs,
+					"already_exists": true,
+				})
+				return
+			}
 			respondError(c, http.StatusConflict, errors.New("this token already exists"))
 			return
 		}
