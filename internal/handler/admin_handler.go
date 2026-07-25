@@ -69,6 +69,10 @@ type apiKeyRequest struct {
 	APIKey string `json:"api_key"`
 }
 
+type accountStatusRequest struct {
+	Enabled *bool `json:"enabled"`
+}
+
 // accountExport is a portable, intentionally credential-bearing backup. It is
 // exposed only by the separately authorized management API and must never be
 // returned from the normal account listing endpoint.
@@ -262,6 +266,63 @@ func (h *AdminHandler) CheckAccountHealth(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"alive": alive, "status": status, "health": health, "checked_at": checkedAt, "message": message})
 }
 
+// UpdateAccountStatus enables or disables a persisted account. Disabled
+// accounts remain stored and can still be checked manually, but the pool will
+// skip them when allocating work.
+func (h *AdminHandler) UpdateAccountStatus(c *gin.Context) {
+	source := strings.ToLower(strings.TrimSpace(c.Param("source")))
+	id := strings.TrimSpace(c.Param("id"))
+	path, ok := h.files[source]
+	if !ok || id == "" {
+		respondError(c, http.StatusBadRequest, errors.New("invalid account reference"))
+		return
+	}
+
+	var req accountStatusRequest
+	if err := c.ShouldBindJSON(&req); err != nil || req.Enabled == nil {
+		respondError(c, http.StatusBadRequest, errors.New("enabled must be a boolean"))
+		return
+	}
+
+	accountFileMu.Lock()
+	defer accountFileMu.Unlock()
+	credential := ""
+	for _, entry := range accounts.LoadTokensFromFile(path) {
+		if managedAccountID(source, entry.Token) == id {
+			credential = entry.Token
+			break
+		}
+	}
+	if credential == "" {
+		respondError(c, http.StatusNotFound, errors.New("account not found"))
+		return
+	}
+
+	status := accounts.StatusDisabled
+	if *req.Enabled {
+		status = accounts.StatusActive
+	}
+	previous, found := h.pool.SetStatusByCredential(credential, status)
+	if !found {
+		respondError(c, http.StatusConflict, errors.New("account is not loaded; restart the service and try again"))
+		return
+	}
+
+	metadata := h.loadMetadata()
+	meta := metadata[id]
+	if meta.Email == "" {
+		meta.Email = emailFromCredential(credential)
+	}
+	meta.Status = status.String()
+	metadata[id] = meta
+	if err := h.saveMetadata(metadata); err != nil {
+		h.pool.SetStatusByCredential(credential, previous)
+		respondError(c, http.StatusInternalServerError, fmt.Errorf("account status changed in memory but could not be saved: %w", err))
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": status.String(), "enabled": *req.Enabled})
+}
+
 func (h *AdminHandler) AddAccount(c *gin.Context) {
 	var req addManagedAccountRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -301,6 +362,9 @@ func (h *AdminHandler) AddAccount(c *gin.Context) {
 	if err != nil {
 		respondError(c, http.StatusBadRequest, err)
 		return
+	}
+	if email == "" {
+		email = emailFromCredential(acct.Token)
 	}
 	if err := appendCredential(path, req.Token, req.TeamID); err != nil {
 		respondError(c, http.StatusInternalServerError, err)

@@ -33,6 +33,7 @@ func TestAdminHandlerAddsListsAndDeletesFreeAccount(t *testing.T) {
 	admin.GET("/accounts/export", h.ExportAccounts)
 	admin.POST("/accounts", h.AddAccount)
 	admin.DELETE("/accounts/:source/:id", h.DeleteAccount)
+	admin.POST("/accounts/:source/:id/status", h.UpdateAccountStatus)
 
 	credential := "9ca8b1b6-707f-4c1b-a1e0-d007839ae597"
 	body, _ := json.Marshal(addManagedAccountRequest{Source: "free", Token: credential})
@@ -63,6 +64,42 @@ func TestAdminHandlerAddsListsAndDeletesFreeAccount(t *testing.T) {
 	}
 	if listed.Data[0].Token == credential {
 		t.Fatal("management API returned an unmasked credential")
+	}
+
+	enabled := false
+	body, _ = json.Marshal(accountStatusRequest{Enabled: &enabled})
+	request = httptest.NewRequest(http.MethodPost, "/admin/api/accounts/free/"+listed.Data[0].ID+"/status", bytes.NewReader(body))
+	request.Header.Set("Authorization", "Bearer admin-secret")
+	request.Header.Set("Content-Type", "application/json")
+	response = httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("disable status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if _, err := pool.Acquire(accounts.TypeNoAuth); err != accounts.ErrNoAvailable {
+		t.Fatalf("disabled account still available: %v", err)
+	}
+
+	request = httptest.NewRequest(http.MethodGet, "/admin/api/accounts", nil)
+	request.Header.Set("Authorization", "Bearer admin-secret")
+	response = httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if err := json.Unmarshal(response.Body.Bytes(), &listed); err != nil || listed.Data[0].Status != "disabled" {
+		t.Fatalf("disabled account listing = %s, err = %v", response.Body.String(), err)
+	}
+
+	enabled = true
+	body, _ = json.Marshal(accountStatusRequest{Enabled: &enabled})
+	request = httptest.NewRequest(http.MethodPost, "/admin/api/accounts/free/"+listed.Data[0].ID+"/status", bytes.NewReader(body))
+	request.Header.Set("Authorization", "Bearer admin-secret")
+	request.Header.Set("Content-Type", "application/json")
+	response = httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("enable status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if _, err := pool.Acquire(accounts.TypeNoAuth); err != nil {
+		t.Fatalf("enabled account not available: %v", err)
 	}
 
 	request = httptest.NewRequest(http.MethodGet, "/admin/api/accounts/export", nil)

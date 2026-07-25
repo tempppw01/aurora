@@ -1,6 +1,9 @@
 package bootstrap
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"os"
 	"strings"
 	"time"
@@ -32,6 +35,7 @@ func Init() (*App, error) {
 	browserfp.Init()
 
 	cfg := config.Load()
+	disabledAccounts := loadDisabledManagedAccounts("account_metadata.json")
 
 	proxies := loadProxyList()
 	proxyPool := proxy.NewPool(proxies)
@@ -58,6 +62,7 @@ func Init() (*App, error) {
 		acct.TeamUserID = t.TeamID
 		acct.ChatGPTAccountID = chatGPTID
 		acct.Status = accounts.StatusActive
+		restoreDisabledStatus(acct, disabledAccounts, "access", t.Token)
 		acct.Proxy = proxyPool.Allocate()
 		accs = append(accs, acct)
 	}
@@ -84,6 +89,7 @@ func Init() (*App, error) {
 		} else {
 			acct.Status = accounts.StatusExpired
 		}
+		restoreDisabledStatus(acct, disabledAccounts, "refresh", t.Token)
 		accs = append(accs, acct)
 	}
 
@@ -106,6 +112,7 @@ func Init() (*App, error) {
 		} else {
 			acct.Status = accounts.StatusExpired
 		}
+		restoreDisabledStatus(acct, disabledAccounts, "session", t.Token)
 		accs = append(accs, acct)
 	}
 
@@ -120,6 +127,7 @@ func Init() (*App, error) {
 		acct := accounts.CreateAccount(t.Token, accounts.TypeNoAuth, profiles)
 		acct.Proxy = proxyPool.Allocate()
 		acct.Status = accounts.StatusActive
+		restoreDisabledStatus(acct, disabledAccounts, "free", t.Token)
 		accs = append(accs, acct)
 	}
 
@@ -167,6 +175,40 @@ func Init() (*App, error) {
 			stopTempGC()
 		},
 	}, nil
+}
+
+// loadDisabledManagedAccounts reads only the state needed during startup. The
+// same metadata file is written by the admin API, so a manually disabled
+// account remains disabled after a Railway redeploy or a local restart.
+func loadDisabledManagedAccounts(path string) map[string]bool {
+	disabled := make(map[string]bool)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return disabled
+	}
+	var metadata map[string]struct {
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(data, &metadata); err != nil {
+		return disabled
+	}
+	for id, meta := range metadata {
+		if meta.Status == accounts.StatusDisabled.String() {
+			disabled[id] = true
+		}
+	}
+	return disabled
+}
+
+func restoreDisabledStatus(acct *accounts.Account, disabled map[string]bool, source, credential string) {
+	if disabled[managedAccountID(source, credential)] {
+		acct.Status = accounts.StatusDisabled
+	}
+}
+
+func managedAccountID(source, credential string) string {
+	sum := sha256.Sum256([]byte(source + "\x00" + credential))
+	return hex.EncodeToString(sum[:16])
 }
 
 // exchangeRefreshToken 用 refresh_token 换 access_token，使用账号自身的 Client（已绑定代理）

@@ -130,6 +130,27 @@ func (p *Pool) FindByCredential(credential string) *Account {
 	return nil
 }
 
+// SetStatusByCredential updates the lifecycle state of a persistent account
+// without exposing the pool's internal slices to management handlers. It
+// returns the previous status and whether a matching account was found.
+func (p *Pool) SetStatusByCredential(credential string, status AccountStatus) (AccountStatus, bool) {
+	if credential == "" {
+		return StatusPending, false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, entries := range [][]*Account{p.noauth, p.free, p.puid} {
+		for _, acct := range entries {
+			if acct != nil && (acct.Token == credential || acct.RefreshToken == credential || acct.SessionToken == credential) {
+				previous := acct.Status
+				acct.Status = status
+				return previous, true
+			}
+		}
+	}
+	return StatusPending, false
+}
+
 // Acquire 从对应类型数组中轮询获取一个可用账号
 func (p *Pool) Acquire(acctType AccountType) (*Account, error) {
 	p.mu.Lock()
@@ -170,6 +191,9 @@ func (p *Pool) ReportFailure(acct *Account) bool {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if acct.Status == StatusDisabled {
+		return false
+	}
 	acct.Status = StatusExpired
 	acct.FailedCalls++
 	return true
