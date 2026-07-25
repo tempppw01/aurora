@@ -2,8 +2,8 @@ package chatgpt
 
 import (
 	"aurora/httpclient"
-	"aurora/internal/sseparser"
 	"aurora/internal/accounts"
+	"aurora/internal/sseparser"
 	"aurora/typings/chatgpt"
 	"encoding/json"
 	"fmt"
@@ -16,9 +16,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	fhttp "github.com/bogdanfinn/fhttp"
 	"github.com/bogdanfinn/websocket"
+	"github.com/gin-gonic/gin"
 )
 
 type fakeAuroraClient struct {
@@ -132,6 +132,35 @@ func TestHandlerStreamsOpenAIChunksAndSentinel(t *testing.T) {
 	}
 	if chunks[5]["choices"].([]interface{})[0].(map[string]interface{})["finish_reason"] != "stop" {
 		t.Fatalf("stop chunk finish_reason missing: %#v", chunks[5])
+	}
+}
+
+func TestHandlerStripsInternalCitationMarkersFromStreamedChunks(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	body := strings.Join([]string{
+		`data: {"choices":[{"delta":{"role":"assistant"}}]}`,
+		`data: {"choices":[{"delta":{"content":"市场\uE200cite"}}]}`,
+		`data: {"choices":[{"delta":{"content":"\uE202turn0search0\uE201特征"}}]}`,
+		`data: {"choices":[{"delta":{},"finish_reason":"stop"}],"conversation_id":"conv-citation"}`,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+	response := &http.Response{Body: io.NopCloser(strings.NewReader(body))}
+	writer := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(writer)
+
+	result := HandlerDetailed(c, response, nil, nil, "request-id", chatGPTRequestForTest(), true, "auto")
+
+	if result.Text != "市场特征" {
+		t.Fatalf("text = %q, want %q", result.Text, "市场特征")
+	}
+	output := writer.Body.String()
+	if strings.Contains(output, "cite") || strings.Contains(output, "turn0") {
+		t.Fatalf("stream output leaked internal citation marker: %s", output)
+	}
+	if !strings.Contains(output, `"content":"市场"`) || !strings.Contains(output, `"content":"特征"`) {
+		t.Fatalf("stream output lost visible answer text: %s", output)
 	}
 }
 
@@ -410,7 +439,7 @@ func (s *sequentialAuroraClient) Request(method httpclient.HttpMethod, url strin
 	return s.responses[idx], nil
 }
 
-func (s *sequentialAuroraClient) SetProxy(url string) error { return nil }
+func (s *sequentialAuroraClient) SetProxy(url string) error                        { return nil }
 func (s *sequentialAuroraClient) SetCookies(rawUrl string, cookies []*http.Cookie) {}
 func (s *sequentialAuroraClient) GetCookies(rawUrl string) []*http.Cookie {
 	// 返回一个 cf_clearance,让 ensureBootstrapped 直接走 fast-path

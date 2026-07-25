@@ -17,9 +17,9 @@ import (
 	"aurora/httpclient"
 	"aurora/internal/accounts"
 	"aurora/internal/sseparser"
+	"aurora/typings"
 	chatgpt_types "aurora/typings/chatgpt"
 	official_types "aurora/typings/official"
-	"aurora/typings"
 
 	"github.com/bogdanfinn/websocket"
 )
@@ -178,6 +178,9 @@ func HandlerDetailedWithOptions(c *gin.Context, response *http.Response, client 
 	var thinkingText string
 	var activeChannel string
 	var assistantMessageID string
+	visibleText := func() string {
+		return strings.Join(imgSource, "") + chatgpt.StripInternalCitationMarkers(previous_text.Text)
+	}
 	artifactState := newArtifactAccumulator()
 	artifactConfig := ArtifactStreamConfig{Delivery: options.ArtifactDelivery}
 	var patchState sseparser.PatchState
@@ -305,7 +308,8 @@ readLoop:
 				if streamEvent.chunk.Sentinel != nil {
 					sentinel = append(sentinel, streamEvent.chunk.Sentinel)
 				}
-				deltaText := sseparser.NormalizeContentDelta(previous_text.Text, streamEvent.text)
+				rawDeltaText := sseparser.NormalizeContentDelta(previous_text.Text, streamEvent.text)
+				deltaText := chatgpt.SanitizedContentDelta(previous_text.Text, rawDeltaText)
 				if streamEvent.channel != "" {
 					activeChannel = streamEvent.channel
 				}
@@ -327,7 +331,7 @@ readLoop:
 						if max_tokens && convId != "" && assistantMessageID != "" {
 							finalizeArtifacts()
 							return HandlerResult{
-								Text:              strings.Join(imgSource, "") + previous_text.Text,
+								Text:              visibleText(),
 								ThinkingText:      thinkingText,
 								ConversationID:    convId,
 								ParentMessageID:   assistantMessageID,
@@ -345,7 +349,7 @@ readLoop:
 						}
 						finalizeArtifacts()
 						return HandlerResult{
-							Text:              strings.Join(imgSource, "") + previous_text.Text,
+							Text:              visibleText(),
 							ThinkingText:      thinkingText,
 							ConversationID:    convId,
 							ParentMessageID:   assistantMessageID,
@@ -383,14 +387,14 @@ readLoop:
 						isRole = false
 					}
 				}
-				if deltaText != "" {
-					previous_text.Text += deltaText
+				if rawDeltaText != "" {
+					previous_text.Text += rawDeltaText
 				}
 				if streamEvent.isStop {
 					if max_tokens && convId != "" && assistantMessageID != "" {
 						finalizeArtifacts()
 						return HandlerResult{
-							Text:              strings.Join(imgSource, "") + previous_text.Text,
+							Text:              visibleText(),
 							ThinkingText:      thinkingText,
 							ConversationID:    convId,
 							ParentMessageID:   assistantMessageID,
@@ -408,7 +412,7 @@ readLoop:
 					}
 					finalizeArtifacts()
 					return HandlerResult{
-						Text:              strings.Join(imgSource, "") + previous_text.Text,
+						Text:              visibleText(),
 						ThinkingText:      thinkingText,
 						ConversationID:    convId,
 						ParentMessageID:   assistantMessageID,
@@ -558,7 +562,7 @@ readLoop:
 				}
 				finalizeArtifacts()
 				return HandlerResult{
-					Text:              strings.Join(imgSource, "") + previous_text.Text,
+					Text:              visibleText(),
 					ThinkingText:      thinkingText,
 					ConversationID:    convId,
 					ParentMessageID:   assistantMessageID,
@@ -579,7 +583,7 @@ readLoop:
 	if !max_tokens {
 		finalizeArtifacts()
 		return HandlerResult{
-			Text:              strings.Join(imgSource, "") + previous_text.Text,
+			Text:              visibleText(),
 			ThinkingText:      thinkingText,
 			ConversationID:    convId,
 			ParentMessageID:   assistantMessageID,
@@ -592,7 +596,7 @@ readLoop:
 	}
 	finalizeArtifacts()
 	return HandlerResult{
-		Text:              strings.Join(imgSource, "") + previous_text.Text,
+		Text:              visibleText(),
 		ThinkingText:      thinkingText,
 		ConversationID:    convId,
 		ParentMessageID:   assistantMessageID,
