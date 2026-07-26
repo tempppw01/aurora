@@ -53,7 +53,7 @@ func RegisterRouter(accountPool *accounts.Pool, cfg *config.Config) *gin.Engine 
 	router.OPTIONS("/v1/audio/transcriptions", optionsHandler)
 	router.OPTIONS("/v1/audio/translations", optionsHandler)
 
-	authGroup := router.Group("").Use(middlewares.Authorization)
+	authGroup := router.Group("").Use(adminHandler.RequestLogger, middlewares.Authorization)
 	authGroup.POST("/v1/chat/completions", chatHandler.Nightmare)
 	authGroup.POST("/v1/responses", chatHandler.Responses)
 	authGroup.POST("/v1/files", chatHandler.Files)
@@ -68,6 +68,7 @@ func RegisterRouter(accountPool *accounts.Pool, cfg *config.Config) *gin.Engine 
 
 	adminGroup := router.Group("/admin/api").Use(adminHandler.Authorize)
 	adminGroup.GET("/accounts", adminHandler.ListAccounts)
+	adminGroup.GET("/request-logs", adminHandler.ListRequestLogs)
 	adminGroup.GET("/accounts/export", adminHandler.ExportAccounts)
 	adminGroup.POST("/accounts", adminHandler.AddAccount)
 	adminGroup.DELETE("/accounts/:source/:id", adminHandler.DeleteAccount)

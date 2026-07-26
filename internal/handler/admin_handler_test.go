@@ -138,6 +138,58 @@ func TestAdminHandlerAddsListsAndDeletesFreeAccount(t *testing.T) {
 	}
 }
 
+func TestRequestLogsCaptureStatusAndAccountWithoutCredential(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	dir := t.TempDir()
+	h := NewAdminHandler(accounts.NewPool(nil), &config.Config{AdminToken: "admin-secret"})
+	h.requestLogs = NewRequestLogStore(filepath.Join(dir, "request_logs.json"), 2)
+	h.files = map[string]string{}
+
+	router := gin.New()
+	router.GET("/v1/success", h.RequestLogger, func(c *gin.Context) {
+		rememberRequestAccount(c, accounts.NewAccount("testing-account", accounts.TypeFree, "credential-must-not-leak"))
+		c.Status(http.StatusOK)
+	})
+	router.GET("/v1/failure", h.RequestLogger, func(c *gin.Context) { c.Status(http.StatusBadGateway) })
+	admin := router.Group("/admin/api").Use(h.Authorize)
+	admin.GET("/request-logs", h.ListRequestLogs)
+
+	for _, path := range []string{"/v1/success", "/v1/failure"} {
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/admin/api/request-logs", nil)
+	request.Header.Set("Authorization", "Bearer admin-secret")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("GET logs status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if bytes.Contains(response.Body.Bytes(), []byte("credential-must-not-leak")) {
+		t.Fatal("request log API leaked an account credential")
+	}
+	var result struct {
+		Data    []requestLogEntry `json:"data"`
+		Summary requestLogSummary `json:"summary"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+		t.Fatalf("decode request logs: %v", err)
+	}
+	if result.Summary.Total != 2 || result.Summary.Success != 1 || result.Summary.Failed != 1 || result.Summary.SuccessRate != 50 {
+		t.Fatalf("unexpected summary: %#v", result.Summary)
+	}
+	if len(result.Data) != 2 || result.Data[1].AccountType != "free" || result.Data[1].Account == "" {
+		t.Fatalf("missing selected account in logs: %#v", result.Data)
+	}
+
+	reloaded := NewRequestLogStore(filepath.Join(dir, "request_logs.json"), 2)
+	entries, _ := reloaded.recent(10)
+	if len(entries) != 2 {
+		t.Fatalf("persistent request logs = %d, want 2", len(entries))
+	}
+}
+
 func TestAdminHandlerRequiresConfiguredToken(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	h := NewAdminHandler(accounts.NewPool(nil), &config.Config{})

@@ -76,7 +76,7 @@ func resolveAccount(c *gin.Context, pool *accounts.Pool, cfg *config.Config, nee
 		if needsPaid && acct.Type == accounts.TypeNoAuth {
 			return nil, http.StatusForbidden, errors.New("this endpoint requires a logged-in ChatGPT account")
 		}
-		return acct, http.StatusOK, nil
+		return rememberRequestAccount(c, acct), http.StatusOK, nil
 	}
 
 	// access_token (JWT) → 创建/复用临时账号 (受 ENABLE_EXTERNAL_TOKEN 控制)
@@ -91,7 +91,7 @@ func resolveAccount(c *gin.Context, pool *accounts.Pool, cfg *config.Config, nee
 		}
 		acct := pool.GetOrCreateTempAccount(token, userAgent, proxyURL)
 		acct.TeamUserID = teamAccountID
-		return acct, http.StatusOK, nil
+		return rememberRequestAccount(c, acct), http.StatusOK, nil
 	}
 
 	// UUID → noauth 账号
@@ -104,7 +104,7 @@ func resolveAccount(c *gin.Context, pool *accounts.Pool, cfg *config.Config, nee
 			return nil, http.StatusInternalServerError, err
 		}
 		acct.Status = accounts.StatusActive
-		return acct, http.StatusOK, nil
+		return rememberRequestAccount(c, acct), http.StatusOK, nil
 	}
 
 	// refresh_token → 换 access_token
@@ -124,7 +124,7 @@ func resolveAccount(c *gin.Context, pool *accounts.Pool, cfg *config.Config, nee
 					return nil, http.StatusInternalServerError, err
 				}
 				acct.Status = accounts.StatusActive
-				return acct, http.StatusOK, nil
+				return rememberRequestAccount(c, acct), http.StatusOK, nil
 			}
 		}
 		return nil, http.StatusBadRequest, errors.New("refresh token response did not include access_token")
@@ -139,7 +139,7 @@ func resolveAccount(c *gin.Context, pool *accounts.Pool, cfg *config.Config, nee
 		return nil, http.StatusForbidden, errors.New("this endpoint requires a logged-in ChatGPT account")
 	}
 	acct.LastUsed = time.Now()
-	return acct, http.StatusOK, nil
+	return rememberRequestAccount(c, acct), http.StatusOK, nil
 }
 
 // conversationClientOrder 执行标准的 conversation 流程：

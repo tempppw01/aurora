@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -96,6 +97,7 @@ type AdminHandler struct {
 	cfg          *config.Config
 	files        map[string]string
 	metadataPath string
+	requestLogs  *RequestLogStore
 }
 
 func NewAdminHandler(pool *accounts.Pool, cfg *config.Config) *AdminHandler {
@@ -109,6 +111,7 @@ func NewAdminHandler(pool *accounts.Pool, cfg *config.Config) *AdminHandler {
 			"free":    "free_tokens.txt",
 		},
 		metadataPath: "account_metadata.json",
+		requestLogs:  NewRequestLogStore("request_logs.json", 500),
 	}
 }
 
@@ -165,6 +168,59 @@ func (h *AdminHandler) ListAccounts(c *gin.Context) {
 		}
 	}
 	c.JSON(http.StatusOK, gin.H{"data": result})
+}
+
+// ListRequestLogs returns the most recent API requests and a success summary.
+// It deliberately never exposes request/response content or credentials.
+func (h *AdminHandler) ListRequestLogs(c *gin.Context) {
+	limit := 100
+	if raw := strings.TrimSpace(c.Query("limit")); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
+			limit = parsed
+		}
+	}
+	if limit > 500 {
+		limit = 500
+	}
+	if h.requestLogs == nil {
+		c.JSON(http.StatusOK, gin.H{"data": []requestLogEntry{}, "summary": requestLogSummary{}})
+		return
+	}
+	entries, summary := h.requestLogs.recent(limit)
+	c.JSON(http.StatusOK, gin.H{"data": entries, "summary": summary})
+}
+
+// requestAccountLabel finds the managed-account email without retaining the
+// account token in a request log. Temporary external-token accounts do not
+// have managed metadata, so they receive a non-sensitive local identifier.
+func (h *AdminHandler) requestAccountLabel(account *accounts.Account) string {
+	if account == nil {
+		return ""
+	}
+	accountFileMu.Lock()
+	defer accountFileMu.Unlock()
+	metadata := h.loadMetadata()
+	for source, path := range h.files {
+		for _, raw := range accounts.LoadTokensFromFile(path) {
+			if raw.Token != account.Token && raw.Token != account.RefreshToken && raw.Token != account.SessionToken {
+				continue
+			}
+			meta := metadata[managedAccountID(source, raw.Token)]
+			if meta.Email != "" {
+				return meta.Email
+			}
+			if email := emailFromCredential(raw.Token); email != "" {
+				return email
+			}
+		}
+	}
+	if account.ID == "" {
+		return "临时账号"
+	}
+	if len(account.ID) > 12 {
+		return "账号 " + account.ID[:8]
+	}
+	return "账号 " + account.ID
 }
 
 // ExportAccounts downloads every persisted account credential as a JSON
