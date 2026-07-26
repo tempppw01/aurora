@@ -1078,6 +1078,28 @@ func TestHandlerAppliesBatchPatch(t *testing.T) {
 	}
 }
 
+func TestHandlerAppliesPathlessBatchPatch(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	body := strings.Join([]string{
+		`data: {"o":"patch","v":[{"p":"/conversation_id","o":"replace","v":"conv-pathless"},{"p":"/message/id","o":"replace","v":"msg-pathless"},{"p":"/message/author/role","o":"replace","v":"assistant"},{"p":"/message/content/parts/0","o":"append","v":"开头内容"}]}`,
+		`data: {"v":[{"p":"/message/content/parts/0","o":"append","v":"后半内容"},{"p":"/message/end_turn","o":"replace","v":true}]}`,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+	response := &http.Response{Body: io.NopCloser(strings.NewReader(body))}
+	writer := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(writer)
+
+	result := HandlerDetailedWithOptions(c, response, nil, nil, "request-id", chatGPTRequestForTest(), true, "auto", HandlerDetailedOptions{})
+
+	if result.Text != "开头内容后半内容" {
+		t.Fatalf("text = %q, want complete pathless batch text", result.Text)
+	}
+	if !strings.Contains(writer.Body.String(), `"content":"开头内容"`) || !strings.Contains(writer.Body.String(), `"content":"后半内容"`) {
+		t.Fatalf("stream output lost pathless batch text: %s", writer.Body.String())
+	}
+}
+
 func TestHandlerTTSParsesPatchStream(t *testing.T) {
 	body := strings.Join([]string{
 		`data: {"p":"/conversation_id","o":"replace","v":"conv-tts"}`,

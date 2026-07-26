@@ -87,6 +87,28 @@ func parseConversationEvent(line string, state *sseparser.PatchState, model stri
 		return conversationStreamEvent{response: state.Response, messageID: state.Response.Message.ID, channel: state.Channel}, true
 	}
 
+	// Recent conversation streams batch patches as {"o":"patch","v":[...]}
+	// and omit the formerly-present outer `p` field. Apply each inner patch
+	// whenever it declares its own path, otherwise the initial assistant text
+	// can be skipped until a later full snapshot arrives.
+	if batch, ok := raw["v"].([]interface{}); ok {
+		applied := false
+		for _, item := range batch {
+			op, ok := item.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			subPath, _ := op["p"].(string)
+			subOp, _ := op["o"].(string)
+			if subPath != "" && sseparser.ApplyPatch(state, subPath, subOp, op["v"]) {
+				applied = true
+			}
+		}
+		if applied {
+			return conversationStreamEvent{response: state.Response, messageID: state.Response.Message.ID, channel: state.Channel}, true
+		}
+	}
+
 	if patchPath, ok := raw["p"].(string); ok {
 		patchOperation, _ := raw["o"].(string)
 		if patchPath == "" && patchOperation == "patch" {
