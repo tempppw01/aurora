@@ -760,12 +760,12 @@ func TestConversationHeadersKeepEmptyConduitHeaderForConversation(t *testing.T) 
 	}
 }
 
-func TestShouldUseWebsocketHandoffSkipsCatchupAfterHTTPBody(t *testing.T) {
-	if shouldUseWebsocketHandoff(false, "conversation-turn-abc", &websocket.Conn{}, "hello", nil) {
-		t.Fatalf("websocket handoff should be skipped when HTTP SSE already emitted text")
+func TestShouldUseWebsocketHandoffUsesCompleteTopicAfterHTTPBody(t *testing.T) {
+	if !shouldUseWebsocketHandoff(false, "conversation-turn-abc", &websocket.Conn{}, "hello", nil) {
+		t.Fatalf("websocket handoff should be used even when HTTP SSE has text")
 	}
-	if shouldUseWebsocketHandoff(false, "conversation-turn-abc", &websocket.Conn{}, "", []string{"![image](url)"}) {
-		t.Fatalf("websocket handoff should be skipped when HTTP SSE already emitted image content")
+	if !shouldUseWebsocketHandoff(false, "conversation-turn-abc", &websocket.Conn{}, "", []string{"![image](url)"}) {
+		t.Fatalf("websocket handoff should be used even when HTTP SSE has image content")
 	}
 	if !shouldUseWebsocketHandoff(false, "conversation-turn-abc", &websocket.Conn{}, "", nil) {
 		t.Fatalf("websocket handoff should be used when HTTP SSE has no body yet")

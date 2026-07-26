@@ -41,6 +41,11 @@ type conversationStreamEvent struct {
 	isStop         bool
 }
 
+type deferredLegacyOutput struct {
+	responseString string
+	delta          string
+}
+
 func parseConversationEvent(line string, state *sseparser.PatchState, model string) (conversationStreamEvent, bool) {
 	var raw map[string]interface{}
 	if err := json.Unmarshal([]byte(line), &raw); err != nil {
@@ -195,6 +200,27 @@ func HandlerDetailedWithOptions(c *gin.Context, response *http.Response, client 
 	var currentEvent string
 	var readingWebsocket bool
 	var websocketStream io.ReadCloser
+	var deferredHTTPOutput []deferredLegacyOutput
+	shouldDeferHTTPOutput := func() bool {
+		return !readingWebsocket && handoffTopicID != "" && wsConn != nil
+	}
+	flushDeferredHTTPOutput := func() error {
+		for _, output := range deferredHTTPOutput {
+			if output.delta != "" {
+				emittedText += output.delta
+				if options.OnTextDelta != nil {
+					options.OnTextDelta(output.delta)
+				}
+			}
+			if writeStream {
+				if _, err := writeLegacyResponseString(c, output.responseString); err != nil {
+					return err
+				}
+			}
+		}
+		deferredHTTPOutput = nil
+		return nil
+	}
 	emitSentinels := func(items []map[string]interface{}) {
 		if len(items) == 0 {
 			return
@@ -271,6 +297,17 @@ readLoop:
 				if shouldUseWebsocketHandoff(readingWebsocket, handoffTopicID, wsConn, emittedText, imgSource) {
 					wsReader, err := chatWebsocketStreamReader(wsConn, handoffTopicID)
 					if err == nil {
+						// The HTTP stream can be a partial transport while the topic
+						// carries the complete assistant message. Drop the held partial
+						// output and restart snapshot tracking for the handoff stream.
+						deferredHTTPOutput = nil
+						previous_text = typings.StringStruct{}
+						textSnapshots = make(map[string]*typings.StringStruct)
+						patchState = sseparser.PatchState{}
+						isRole = true
+						isEnd = false
+						max_tokens = false
+						finish_reason = ""
 						websocketStream = wsReader
 						defer websocketStream.Close()
 						reader = bufio.NewReader(wsReader)
@@ -278,6 +315,9 @@ readLoop:
 						currentEvent = ""
 						continue readLoop
 					}
+				}
+				if err := flushDeferredHTTPOutput(); err != nil {
+					return HandlerResult{}
 				}
 				finalizeArtifacts()
 				break readLoop
@@ -573,22 +613,30 @@ readLoop:
 			}
 			willContinue := isEnd && max_tokens && convId != "" && assistantMessageID != ""
 			legacyDelta := chatCompletionDelta(response_string)
-			if legacyDelta != "" {
-				emittedText += legacyDelta
-			}
-			if options.OnTextDelta != nil {
+			if shouldDeferHTTPOutput() {
+				deferredHTTPOutput = append(deferredHTTPOutput, deferredLegacyOutput{responseString: response_string, delta: legacyDelta})
+			} else {
 				if legacyDelta != "" {
+					emittedText += legacyDelta
+				}
+				if options.OnTextDelta != nil && legacyDelta != "" {
 					options.OnTextDelta(legacyDelta)
 				}
-			}
-			if writeStream {
-				_, err = writeLegacyResponseString(c, response_string)
-				if err != nil {
-					return HandlerResult{}
+				if writeStream {
+					_, err = writeLegacyResponseString(c, response_string)
+					if err != nil {
+						return HandlerResult{}
+					}
 				}
 			}
 
 			if isEnd {
+				if shouldDeferHTTPOutput() {
+					// Keep reading through [DONE] so the complete WebSocket handoff
+					// can replace this partial HTTP response.
+					currentEvent = ""
+					continue
+				}
 				if writeStream && !willContinue {
 					final_line := official_types.StopChunkWithConversation(finish_reason, model, convId)
 					c.Writer.WriteString("data: " + final_line.String() + "\n\n")
@@ -628,6 +676,9 @@ readLoop:
 			currentEvent = ""
 		}
 		if err == io.EOF {
+			if flushErr := flushDeferredHTTPOutput(); flushErr != nil {
+				return HandlerResult{}
+			}
 			break
 		}
 	}

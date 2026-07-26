@@ -290,5 +290,9 @@ func shouldUseWebsocketHandoff(readingWebsocket bool, handoffTopicID string, wsC
 	if readingWebsocket || handoffTopicID == "" || wsConn == nil {
 		return false
 	}
-	return text == "" && strings.Join(imgSource, "") == ""
+	// A non-empty HTTP body is not proof that the answer is complete: current
+	// ChatGPT transports can put a tail fragment on HTTP and the full message on
+	// the subscribed topic. The caller holds that fragment until the handoff
+	// succeeds, then falls back to it if the topic cannot be read.
+	return true
 }
