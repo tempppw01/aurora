@@ -397,8 +397,9 @@ readLoop:
 						streamEvent.chunk.Sentinel != nil ||
 						(streamEvent.isStop && !willContinue)
 					if shouldWrite {
-						c.Writer.WriteString("data: " + outChunk.String() + "\n\n")
-						c.Writer.Flush()
+						if err := writeChatCompletionChunk(c, outChunk); err != nil {
+							return HandlerResult{}
+						}
 					}
 					if streamEvent.role != "" && isRole {
 						isRole = false
@@ -572,11 +573,10 @@ readLoop:
 				}
 			}
 			if writeStream {
-				_, err = c.Writer.WriteString(response_string)
+				_, err = writeLegacyResponseString(c, response_string)
 				if err != nil {
 					return HandlerResult{}
 				}
-				c.Writer.Flush()
 			}
 
 			if isEnd {
@@ -681,4 +681,56 @@ func chatCompletionDelta(responseString string) string {
 		return ""
 	}
 	return chunk.Choices[0].Delta.Content
+}
+
+// writeChatCompletionChunk keeps role and text in separate SSE events.  The
+// OpenAI-compatible shape is a role-only event followed by text events. Some
+// clients discard content when it shares the first event with `role`, which
+// makes a rich response appear to start in the middle after its first snapshot.
+func writeChatCompletionChunk(c *gin.Context, chunk official_types.ChatCompletionChunk) error {
+	if len(chunk.Choices) > 0 {
+		delta := chunk.Choices[0].Delta
+		if delta.Role != "" && delta.Content != "" {
+			roleChunk := chunk
+			roleChunk.Choices = append([]official_types.Choices(nil), chunk.Choices...)
+			roleChunk.Choices[0].Delta.Content = ""
+			if _, err := c.Writer.WriteString("data: " + roleChunk.String() + "\n\n"); err != nil {
+				return err
+			}
+
+			textChunk := chunk
+			textChunk.Choices = append([]official_types.Choices(nil), chunk.Choices...)
+			textChunk.Choices[0].Delta.Role = ""
+			if _, err := c.Writer.WriteString("data: " + textChunk.String() + "\n\n"); err != nil {
+				return err
+			}
+			c.Writer.Flush()
+			return nil
+		}
+	}
+	_, err := c.Writer.WriteString("data: " + chunk.String() + "\n\n")
+	if err == nil {
+		c.Writer.Flush()
+	}
+	return err
+}
+
+// writeLegacyResponseString writes a converted legacy SSE event.  ConvertToString
+// returns an SSE string rather than a chunk, so decode it only when needed to
+// apply the same role/text separation used for native OpenAI chunks.
+func writeLegacyResponseString(c *gin.Context, responseString string) (int, error) {
+	payload := strings.TrimSpace(strings.TrimPrefix(responseString, "data: "))
+	var chunk official_types.ChatCompletionChunk
+	if err := json.Unmarshal([]byte(payload), &chunk); err == nil && len(chunk.Choices) > 0 &&
+		chunk.Choices[0].Delta.Role != "" && chunk.Choices[0].Delta.Content != "" {
+		if err := writeChatCompletionChunk(c, chunk); err != nil {
+			return 0, err
+		}
+		return len(responseString), nil
+	}
+	n, err := c.Writer.WriteString(responseString)
+	if err == nil {
+		c.Writer.Flush()
+	}
+	return n, err
 }

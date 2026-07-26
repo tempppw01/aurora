@@ -134,6 +134,15 @@ func TestHandlerKeepsTextFromMultimodalResponseBeforeLaterText(t *testing.T) {
 	if !strings.Contains(writer.Body.String(), `"content":"开头内容"`) || !strings.Contains(writer.Body.String(), `"content":"后半内容"`) {
 		t.Fatalf("stream output omitted rich-response text: %s", writer.Body.String())
 	}
+	chunks := parseSSEChunks(t, writer.Body.String())
+	firstDelta := chunks[0]["choices"].([]interface{})[0].(map[string]interface{})["delta"].(map[string]interface{})
+	if firstDelta["role"] != "assistant" || firstDelta["content"] != nil {
+		t.Fatalf("first rich-response chunk = %#v, want role only", firstDelta)
+	}
+	secondDelta := chunks[1]["choices"].([]interface{})[0].(map[string]interface{})["delta"].(map[string]interface{})
+	if secondDelta["role"] != nil || secondDelta["content"] != "开头内容" {
+		t.Fatalf("second rich-response chunk = %#v, want the first text", secondDelta)
+	}
 }
 
 func TestHandlerStreamsOpenAIChunksAndSentinel(t *testing.T) {
@@ -242,18 +251,22 @@ func TestHandlerStreamsConcatenatedOpenAIChunks(t *testing.T) {
 	}
 
 	chunks := parseSSEChunks(t, writer.Body.String())
-	if len(chunks) != 3 {
-		t.Fatalf("chunk count = %d, want 3; output: %s", len(chunks), writer.Body.String())
+	if len(chunks) != 4 {
+		t.Fatalf("chunk count = %d, want 4; output: %s", len(chunks), writer.Body.String())
 	}
 	firstDelta := chunks[0]["choices"].([]interface{})[0].(map[string]interface{})["delta"].(map[string]interface{})
-	if firstDelta["role"] != "assistant" || firstDelta["content"] != "is" {
-		t.Fatalf("first chunk delta = %#v, want role+content in one chunk", firstDelta)
+	if firstDelta["role"] != "assistant" || firstDelta["content"] != nil {
+		t.Fatalf("first chunk delta = %#v, want role only", firstDelta)
 	}
-	if chunks[1]["choices"].([]interface{})[0].(map[string]interface{})["delta"].(map[string]interface{})["content"] != "This is a test!" {
-		t.Fatalf("second chunk should include second content delta: %#v", chunks[1])
+	secondDelta := chunks[1]["choices"].([]interface{})[0].(map[string]interface{})["delta"].(map[string]interface{})
+	if secondDelta["role"] != nil || secondDelta["content"] != "is" {
+		t.Fatalf("second chunk delta = %#v, want first text without role", secondDelta)
 	}
-	if chunks[2]["conversation_id"] != "conv-stream" {
-		t.Fatalf("stop chunk conversation_id = %#v, want conv-stream", chunks[2]["conversation_id"])
+	if chunks[2]["choices"].([]interface{})[0].(map[string]interface{})["delta"].(map[string]interface{})["content"] != "This is a test!" {
+		t.Fatalf("third chunk should include second content delta: %#v", chunks[2])
+	}
+	if chunks[3]["conversation_id"] != "conv-stream" {
+		t.Fatalf("stop chunk conversation_id = %#v, want conv-stream", chunks[3]["conversation_id"])
 	}
 }
 
