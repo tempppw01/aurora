@@ -44,6 +44,23 @@ func TestSanitizedContentDeltaHandlesSplitCitationMarker(t *testing.T) {
 	}
 }
 
+func TestStripInternalCitationMarkersConvertsEntityMarkers(t *testing.T) {
+	raw := "\uE200entity\uE202[\"book\",\"西游记\",\"中国古典小说\"]\uE201是四大名著之一"
+	if got := StripInternalCitationMarkers(raw); got != "西游记是四大名著之一" {
+		t.Fatalf("StripInternalCitationMarkers(%q) = %q", raw, got)
+	}
+}
+
+func TestSanitizedContentDeltaHandlesSplitEntityMarker(t *testing.T) {
+	firstRaw := "\uE200entity\uE202[\"book\",\"西游记\""
+	if got := SanitizedContentDelta("", firstRaw); got != "" {
+		t.Fatalf("partial entity delta = %q, want empty", got)
+	}
+	if got := SanitizedContentDelta(firstRaw, ",\"中国古典小说\"]\uE201是四大名著之一"); got != "西游记是四大名著之一" {
+		t.Fatalf("completed entity delta = %q", got)
+	}
+}
+
 func TestSanitizedSnapshotDelta(t *testing.T) {
 	previousRaw := "市场"
 	currentRaw := "市场\uE200cite\uE202turn0search0\uE201特征"
