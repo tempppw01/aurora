@@ -517,10 +517,12 @@ readLoop:
 			if !(original_response.Message.Author.Role == "assistant" || (original_response.Message.Author.Role == "tool" && original_response.Message.Content.ContentType != "text")) || original_response.Message.Content.Parts == nil {
 				continue
 			}
-			if original_response.Message.Metadata.MessageType == "" && activeChannel != "final" {
-				continue
-			}
-			if (original_response.Message.Metadata.MessageType != "next" && original_response.Message.Metadata.MessageType != "continue" && activeChannel != "final") || !strings.HasSuffix(original_response.Message.Content.ContentType, "text") {
+			// Rich-response streams frequently send the opening assistant snapshot
+			// before attaching message_type/channel metadata. It is still visible
+			// answer text; filtering it here made responses start at a random later
+			// fragment once the metadata finally arrived. Analysis was handled above,
+			// so forward every eligible assistant text message from this point on.
+			if !strings.HasSuffix(original_response.Message.Content.ContentType, "text") {
 				continue
 			}
 			if isEndTurn(original_response.Message.EndTurn) {

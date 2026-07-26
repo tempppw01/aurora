@@ -168,6 +168,28 @@ func TestHandlerDoesNotUseOneMessageSnapshotForAnotherMessage(t *testing.T) {
 	}
 }
 
+func TestHandlerKeepsOpeningAssistantTextBeforeMessageMetadata(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	body := strings.Join([]string{
+		`data: {"v":{"conversation_id":"conv-opening","message":{"id":"msg-opening","author":{"role":"assistant"},"content":{"content_type":"text","parts":["开头正文"]},"metadata":{},"recipient":"all","end_turn":true}}}`,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+	response := &http.Response{Body: io.NopCloser(strings.NewReader(body))}
+	writer := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(writer)
+
+	result := HandlerDetailed(c, response, nil, nil, "request-id", chatGPTRequestForTest(), true, "auto")
+
+	if result.Text != "开头正文" {
+		t.Fatalf("text = %q, want opening assistant text", result.Text)
+	}
+	if !strings.Contains(writer.Body.String(), `"content":"开头正文"`) {
+		t.Fatalf("stream omitted opening assistant text: %s", writer.Body.String())
+	}
+}
+
 func TestHandlerStreamsOpenAIChunksAndSentinel(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
