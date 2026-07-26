@@ -14,7 +14,10 @@ func ConvertToString(chatgpt_response *chatgpt_types.ChatGPTResponse, previous_t
 	previous_text.Text = currentText
 	translated_response := official_types.NewChatCompletionChunk(deltaText, model)
 	if role {
-		translated_response.Choices[0].Delta.Role = chatgpt_response.Message.Author.Role
+		// ChatGPT uses the internal "tool" author for image-generation
+		// artifacts. OpenAI Chat Completions only permits assistant output here;
+		// exposing the internal role makes strict clients reject the whole stream.
+		translated_response.Choices[0].Delta.Role = "assistant"
 	} else if translated_response.Choices[0].Delta.Content == "" || translated_response.Choices[0].Delta.Content == "【" {
 		return translated_response.Choices[0].Delta.Content
 	}

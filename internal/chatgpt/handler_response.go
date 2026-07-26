@@ -460,6 +460,11 @@ readLoop:
 						}
 						if streamEvent.role == "" || !isRole {
 							outChunk.Choices[0].Delta.Role = ""
+						} else {
+							// Upstream image tools emit role="tool". That is an
+							// internal producer role, not a valid streamed completion
+							// role for OpenAI-compatible clients.
+							outChunk.Choices[0].Delta.Role = "assistant"
 						}
 					}
 					if streamEvent.isStop && outChunk.ConversationID == "" {
@@ -616,7 +621,7 @@ readLoop:
 				wg.Wait()
 				translated_response := official_types.NewChatCompletionChunk(strings.Join(imgSource, ""), model)
 				if isRole {
-					translated_response.Choices[0].Delta.Role = original_response.Message.Author.Role
+					translated_response.Choices[0].Delta.Role = "assistant"
 				}
 				// A multimodal response can contain normal text before or after
 				// image descriptors. Emit that text first so it is not discarded
@@ -819,12 +824,20 @@ func writeChatCompletionChunk(c *gin.Context, chunk official_types.ChatCompletio
 func writeLegacyResponseString(c *gin.Context, responseString string) (int, error) {
 	payload := strings.TrimSpace(strings.TrimPrefix(responseString, "data: "))
 	var chunk official_types.ChatCompletionChunk
-	if err := json.Unmarshal([]byte(payload), &chunk); err == nil && len(chunk.Choices) > 0 &&
-		chunk.Choices[0].Delta.Role != "" && chunk.Choices[0].Delta.Content != "" {
-		if err := writeChatCompletionChunk(c, chunk); err != nil {
-			return 0, err
+	if err := json.Unmarshal([]byte(payload), &chunk); err == nil && len(chunk.Choices) > 0 {
+		if chunk.Choices[0].Delta.Role != "" && chunk.Choices[0].Delta.Role != "assistant" {
+			chunk.Choices[0].Delta.Role = "assistant"
+			if err := writeChatCompletionChunk(c, chunk); err != nil {
+				return 0, err
+			}
+			return len(responseString), nil
 		}
-		return len(responseString), nil
+		if chunk.Choices[0].Delta.Role != "" && chunk.Choices[0].Delta.Content != "" {
+			if err := writeChatCompletionChunk(c, chunk); err != nil {
+				return 0, err
+			}
+			return len(responseString), nil
+		}
 	}
 	n, err := c.Writer.WriteString(responseString)
 	if err == nil {

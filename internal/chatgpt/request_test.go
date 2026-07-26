@@ -266,6 +266,33 @@ func TestHandlerStreamsOpenAIChunksAndSentinel(t *testing.T) {
 	}
 }
 
+func TestHandlerNormalizesInternalToolRoleToAssistant(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	body := strings.Join([]string{
+		`data: {"choices":[{"delta":{"role":"tool"}}]}`,
+		`data: {"choices":[{"delta":{"content":"![generated image](https://example.test/image.png)"}}]}`,
+		`data: {"choices":[{"delta":{},"finish_reason":"stop"}]}`,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+	response := &http.Response{Body: io.NopCloser(strings.NewReader(body))}
+	writer := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(writer)
+
+	result := HandlerDetailed(c, response, nil, nil, "request-id", chatGPTRequestForTest(), true, "auto")
+
+	if result.Text != "![generated image](https://example.test/image.png)" {
+		t.Fatalf("text = %q, want generated image markdown", result.Text)
+	}
+	output := writer.Body.String()
+	if strings.Contains(output, `"role":"tool"`) {
+		t.Fatalf("stream exposed internal tool role: %s", output)
+	}
+	if !strings.Contains(output, `"role":"assistant"`) {
+		t.Fatalf("stream did not emit assistant role: %s", output)
+	}
+}
+
 func TestHandlerStripsInternalCitationMarkersFromStreamedChunks(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
