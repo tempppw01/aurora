@@ -168,6 +168,31 @@ func TestHandlerDoesNotUseOneMessageSnapshotForAnotherMessage(t *testing.T) {
 	}
 }
 
+func TestHandlerDoesNotForwardAssistantHistoryFromRequest(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	request := chatGPTRequestForTest()
+	request.AddAssistantMessage("上一轮《西游记》的回复")
+	historyID := request.Messages[len(request.Messages)-1].ID.String()
+	body := strings.Join([]string{
+		fmt.Sprintf(`data: {"v":{"conversation_id":"conv-history","message":{"id":"%s","author":{"role":"assistant"},"channel":"final","content":{"content_type":"text","parts":["上一轮《西游记》的回复"]},"metadata":{"message_type":"next"},"recipient":"all","end_turn":true}}}`, historyID),
+		`data: {"v":{"conversation_id":"conv-history","message":{"id":"msg-new","author":{"role":"assistant"},"channel":"final","content":{"content_type":"text","parts":["本轮《水浒传》的回复"]},"metadata":{"message_type":"next"},"recipient":"all","end_turn":true}}}`,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+	response := &http.Response{Body: io.NopCloser(strings.NewReader(body))}
+	writer := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(writer)
+
+	result := HandlerDetailed(c, response, nil, nil, "request-id", request, true, "auto")
+
+	if result.Text != "本轮《水浒传》的回复" {
+		t.Fatalf("text = %q, want only the new assistant reply", result.Text)
+	}
+	if strings.Contains(writer.Body.String(), "上一轮《西游记》的回复") {
+		t.Fatalf("stream output replayed assistant history: %s", writer.Body.String())
+	}
+}
+
 func TestHandlerKeepsOpeningAssistantTextBeforeMessageMetadata(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

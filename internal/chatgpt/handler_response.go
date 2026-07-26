@@ -202,6 +202,16 @@ func HandlerDetailedWithOptions(c *gin.Context, response *http.Response, client 
 	var finish_reason string
 	var previous_text typings.StringStruct
 	textSnapshots := make(map[string]*typings.StringStruct)
+	// ChatGPT echoes the messages supplied in a stateless OpenAI request before
+	// it streams the newly generated assistant message. Those assistant IDs are
+	// input history, not output for this turn, and must never be forwarded to
+	// the OpenAI client.
+	historyAssistantMessageIDs := make(map[string]struct{})
+	for _, message := range translated_request.Messages {
+		if message.Author.Role == "assistant" {
+			historyAssistantMessageIDs[message.ID.String()] = struct{}{}
+		}
+	}
 	var original_response chatgpt_types.ChatGPTResponse
 	var isRole = true
 	var isEnd = false
@@ -526,6 +536,10 @@ readLoop:
 			}
 			if streamEvent.channel != "" {
 				activeChannel = streamEvent.channel
+			}
+			if _, isHistory := historyAssistantMessageIDs[original_response.Message.ID]; isHistory {
+				currentEvent = ""
+				continue
 			}
 			if original_response.Message.ID != "" && (original_response.Message.Author.Role == "assistant" || original_response.Message.Author.Role == "tool") {
 				assistantMessageID = original_response.Message.ID
