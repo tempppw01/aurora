@@ -27,9 +27,35 @@ func ConvertToString(chatgpt_response *chatgpt_types.ChatGPTResponse, previous_t
 func TextFromParts(parts []interface{}) string {
 	var text strings.Builder
 	for _, part := range parts {
-		if value, ok := part.(string); ok {
-			text.WriteString(value)
-		}
+		appendTextPart(&text, part)
 	}
 	return text.String()
+}
+
+// appendTextPart accepts both the historical string parts and the structured
+// text parts emitted by newer rich-response streams. Image descriptors are
+// deliberately ignored so their prompts or asset IDs never become answer text.
+func appendTextPart(text *strings.Builder, part interface{}) {
+	switch value := part.(type) {
+	case string:
+		text.WriteString(value)
+	case []interface{}:
+		for _, nested := range value {
+			appendTextPart(text, nested)
+		}
+	case map[string]interface{}:
+		contentType, _ := value["content_type"].(string)
+		if strings.Contains(strings.ToLower(contentType), "image") || value["asset_pointer"] != nil {
+			return
+		}
+		for _, key := range []string{"text", "content", "value"} {
+			if nested, ok := value[key]; ok {
+				appendTextPart(text, nested)
+				return
+			}
+		}
+		if nested, ok := value["parts"]; ok {
+			appendTextPart(text, nested)
+		}
+	}
 }

@@ -145,6 +145,29 @@ func TestHandlerKeepsTextFromMultimodalResponseBeforeLaterText(t *testing.T) {
 	}
 }
 
+func TestHandlerDoesNotUseOneMessageSnapshotForAnotherMessage(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	body := strings.Join([]string{
+		`data: {"v":{"conversation_id":"conv-message-boundary","message":{"id":"msg-first","author":{"role":"assistant"},"channel":"final","content":{"content_type":"text","parts":["图片前文字"]},"metadata":{"message_type":"next"},"recipient":"all","end_turn":false}}}`,
+		`data: {"v":{"conversation_id":"conv-message-boundary","message":{"id":"msg-final","author":{"role":"assistant"},"channel":"final","content":{"content_type":"text","parts":["图片前文字后半段"]},"metadata":{"message_type":"next"},"recipient":"all","end_turn":true}}}`,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+	response := &http.Response{Body: io.NopCloser(strings.NewReader(body))}
+	writer := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(writer)
+
+	result := HandlerDetailed(c, response, nil, nil, "request-id", chatGPTRequestForTest(), true, "auto")
+
+	if !strings.Contains(result.Text, "图片前文字后半段") {
+		t.Fatalf("text = %q, want the complete second-message snapshot", result.Text)
+	}
+	if !strings.Contains(writer.Body.String(), `"content":"图片前文字后半段"`) {
+		t.Fatalf("stream omitted the opening of the second message: %s", writer.Body.String())
+	}
+}
+
 func TestHandlerStreamsOpenAIChunksAndSentinel(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

@@ -61,3 +61,14 @@ func TestTextFromPartsKeepsTextAroundRichParts(t *testing.T) {
 		t.Fatalf("text = %q, want all textual parts", text)
 	}
 }
+
+func TestTextFromPartsKeepsStructuredRichText(t *testing.T) {
+	text := TextFromParts([]interface{}{
+		map[string]interface{}{"type": "text", "text": "开头"},
+		map[string]interface{}{"content_type": "image_asset_pointer", "asset_pointer": "file-service://image", "text": "不能输出"},
+		map[string]interface{}{"content": []interface{}{map[string]interface{}{"value": "结尾"}}},
+	})
+	if text != "开头结尾" {
+		t.Fatalf("text = %q, want structured text without image metadata", text)
+	}
+}

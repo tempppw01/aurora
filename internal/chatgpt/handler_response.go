@@ -174,6 +174,7 @@ func HandlerDetailedWithOptions(c *gin.Context, response *http.Response, client 
 	}
 	var finish_reason string
 	var previous_text typings.StringStruct
+	textSnapshots := make(map[string]*typings.StringStruct)
 	var original_response chatgpt_types.ChatGPTResponse
 	var isRole = true
 	var isEnd = false
@@ -267,7 +268,7 @@ readLoop:
 		}
 		for _, line := range sseparser.DataPayloads(line) {
 			if strings.HasPrefix(line, "[DONE]") {
-				if shouldUseWebsocketHandoff(readingWebsocket, handoffTopicID, wsConn, previous_text.Text, imgSource) {
+				if shouldUseWebsocketHandoff(readingWebsocket, handoffTopicID, wsConn, emittedText, imgSource) {
 					wsReader, err := chatWebsocketStreamReader(wsConn, handoffTopicID)
 					if err == nil {
 						websocketStream = wsReader
@@ -505,6 +506,14 @@ readLoop:
 				}
 			}
 			response_string := ""
+			textSnapshot := &previous_text
+			if messageID := original_response.Message.ID; messageID != "" {
+				textSnapshot = textSnapshots[messageID]
+				if textSnapshot == nil {
+					textSnapshot = &typings.StringStruct{}
+					textSnapshots[messageID] = textSnapshot
+				}
+			}
 			if original_response.Message.Recipient != "all" {
 				continue
 			}
@@ -535,13 +544,13 @@ readLoop:
 				// image descriptors. Emit that text first so it is not discarded
 				// while the renderer handles the image assets.
 				if chatgpt.TextFromParts(original_response.Message.Content.Parts) != "" {
-					response_string = chatgpt.ConvertToString(&original_response, &previous_text, isRole, model)
+					response_string = chatgpt.ConvertToString(&original_response, textSnapshot, isRole, model)
 				} else {
 					response_string = "data: " + translated_response.String() + "\n\n"
 				}
 			}
 			if response_string == "" {
-				response_string = chatgpt.ConvertToString(&original_response, &previous_text, isRole, model)
+				response_string = chatgpt.ConvertToString(&original_response, textSnapshot, isRole, model)
 			}
 			if response_string == "" {
 				if isEnd {
