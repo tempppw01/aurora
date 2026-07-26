@@ -37,6 +37,7 @@ func (h *ModelsHandler) ListModels(c *gin.Context) {
 		"o3",
 		"o4-mini",
 		"o4-mini-high",
+		"gpt-image-2",
 	}
 
 	var resModelList []ResData
