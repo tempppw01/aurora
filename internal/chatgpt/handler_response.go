@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 
@@ -223,6 +224,52 @@ func HandlerDetailedWithOptions(c *gin.Context, response *http.Response, client 
 		_, _ = c.Writer.WriteString("data: " + chunk.String() + "\n\n")
 		c.Writer.Flush()
 	}
+	emitUnparsedStreamTrace := func(rawLine string) {
+		if !debugStreamTrace {
+			return
+		}
+		var raw map[string]interface{}
+		_ = json.Unmarshal([]byte(rawLine), &raw)
+		keys := make([]string, 0, len(raw))
+		for key := range raw {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		valueKind := "missing"
+		valueKeys := []string(nil)
+		switch value := raw["v"].(type) {
+		case string:
+			valueKind = "string"
+		case []interface{}:
+			valueKind = "array"
+		case map[string]interface{}:
+			valueKind = "object"
+			valueKeys = make([]string, 0, len(value))
+			for key := range value {
+				valueKeys = append(valueKeys, key)
+			}
+			sort.Strings(valueKeys)
+		case nil:
+			valueKind = "null"
+		default:
+			valueKind = "other"
+		}
+		chunk := official_types.NewChatCompletionChunk("", model)
+		chunk.Sentinel = map[string]interface{}{
+			"event":          "debug_stream_trace",
+			"stage":          "unparsed",
+			"event_name":     currentEvent,
+			"raw_type":       stringValue(raw["type"]),
+			"patch_path":     stringValue(raw["p"]),
+			"patch_op":       stringValue(raw["o"]),
+			"raw_keys":       keys,
+			"value_kind":     valueKind,
+			"value_keys":     valueKeys,
+			"from_websocket": readingWebsocket,
+		}
+		_, _ = c.Writer.WriteString("data: " + chunk.String() + "\n\n")
+		c.Writer.Flush()
+	}
 	var deferredHTTPOutput []deferredLegacyOutput
 	shouldDeferHTTPOutput := func() bool {
 		return !readingWebsocket && handoffTopicID != "" && wsConn != nil
@@ -368,7 +415,7 @@ readLoop:
 				fmt.Printf("[sse-in] src=%s channel=%q textLen=%d finish=%q parsed=%v raw=%q\n", debugSrc, streamEvent.channel, len(debugText), streamEvent.finishReason, ok, raw)
 			}
 			if !ok {
-				emitStreamTrace("unparsed", chatgpt_types.ChatGPTResponse{}, 0)
+				emitUnparsedStreamTrace(line)
 				currentEvent = ""
 				continue
 			}
