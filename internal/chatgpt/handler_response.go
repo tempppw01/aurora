@@ -200,6 +200,29 @@ func HandlerDetailedWithOptions(c *gin.Context, response *http.Response, client 
 	var currentEvent string
 	var readingWebsocket bool
 	var websocketStream io.ReadCloser
+	debugStreamTrace := c.Request != nil && c.GetHeader("X-Aurora-Debug-Stream") == "1" && writeStream
+	emitStreamTrace := func(stage string, response chatgpt_types.ChatGPTResponse, deltaLength int) {
+		if !debugStreamTrace {
+			return
+		}
+		chunk := official_types.NewChatCompletionChunk("", model)
+		chunk.Sentinel = map[string]interface{}{
+			"event":          "debug_stream_trace",
+			"stage":          stage,
+			"channel":        activeChannel,
+			"role":           response.Message.Author.Role,
+			"recipient":      response.Message.Recipient,
+			"content_type":   response.Message.Content.ContentType,
+			"message_type":   response.Message.Metadata.MessageType,
+			"parts":          len(response.Message.Content.Parts),
+			"text_length":    len(chatgpt.TextFromParts(response.Message.Content.Parts)),
+			"delta_length":   deltaLength,
+			"end_turn":       isEndTurn(response.Message.EndTurn),
+			"from_websocket": readingWebsocket,
+		}
+		_, _ = c.Writer.WriteString("data: " + chunk.String() + "\n\n")
+		c.Writer.Flush()
+	}
 	var deferredHTTPOutput []deferredLegacyOutput
 	shouldDeferHTTPOutput := func() bool {
 		return !readingWebsocket && handoffTopicID != "" && wsConn != nil
@@ -345,6 +368,7 @@ readLoop:
 				fmt.Printf("[sse-in] src=%s channel=%q textLen=%d finish=%q parsed=%v raw=%q\n", debugSrc, streamEvent.channel, len(debugText), streamEvent.finishReason, ok, raw)
 			}
 			if !ok {
+				emitStreamTrace("unparsed", chatgpt_types.ChatGPTResponse{}, 0)
 				currentEvent = ""
 				continue
 			}
@@ -490,6 +514,7 @@ readLoop:
 				continue
 			}
 			original_response = streamEvent.response
+			emitStreamTrace("snapshot", original_response, 0)
 			if original_response.Error != nil {
 				c.JSON(500, gin.H{"error": original_response.Error})
 				return HandlerResult{}
@@ -615,6 +640,7 @@ readLoop:
 			}
 			willContinue := isEnd && max_tokens && convId != "" && assistantMessageID != ""
 			legacyDelta := chatCompletionDelta(response_string)
+			emitStreamTrace("forward", original_response, len(legacyDelta))
 			if shouldDeferHTTPOutput() {
 				deferredHTTPOutput = append(deferredHTTPOutput, deferredLegacyOutput{responseString: response_string, delta: legacyDelta})
 			} else {
