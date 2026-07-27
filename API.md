@@ -201,7 +201,7 @@ curl --location 'http://你的服务器ip:8080/v1/responses' \
 
 将 `stream` 设为 `true` 后，接口会按 SSE 实时返回 `response.created`、`response.output_item.added`、`response.reasoning_text.delta`（上游提供推理内容时）、`response.output_text.delta`、`response.output_item.done`、`response.completed` 和最终的 `data: [DONE]`。
 
-`reasoning.effort` 支持 `none`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`；Aurora 会映射为 ChatGPT 上游可接受的三档强度。最终 `response.completed` 的 `usage` 包含输入、输出、推理 token 明细，另含 `ms_since_start` 与 `ms_ttft`（首个输出到达耗时）。缓存字段固定为 `0`，因为 ChatGPT 上游不提供真实缓存用量。
+`reasoning.effort` 支持 `none`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`；Aurora 会映射为 ChatGPT 上游可接受的 `low`、`standard`、`high` 三档强度。最终 `response.completed` 的 `usage` 包含输入、输出、推理 token 明细，另含 `ms_since_start` 与 `ms_ttft`（首个输出到达耗时）。缓存字段固定为 `0`，因为 ChatGPT 上游不提供真实缓存用量。
 
 ## 模型列表
 

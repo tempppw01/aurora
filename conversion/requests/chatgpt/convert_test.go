@@ -35,12 +35,12 @@ func TestConvertAPIRequestMapsExtendedReasoningEffort(t *testing.T) {
 		"none":     "low",
 		"minimal":  "low",
 		"low":      "low",
-		"medium":   "medium",
-		"standard": "medium",
+		"medium":   "standard",
+		"standard": "standard",
 		"high":     "high",
 		"xhigh":    "high",
 		"max":      "high",
-		"unknown":  "medium",
+		"unknown":  "standard",
 	}
 	for effort, want := range cases {
 		t.Run(effort, func(t *testing.T) {
