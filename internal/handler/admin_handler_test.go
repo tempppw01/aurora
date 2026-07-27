@@ -31,6 +31,7 @@ func TestAdminHandlerAddsListsAndDeletesFreeAccount(t *testing.T) {
 	admin := router.Group("/admin/api").Use(h.Authorize)
 	admin.GET("/accounts", h.ListAccounts)
 	admin.GET("/accounts/export", h.ExportAccounts)
+	admin.POST("/accounts/import", h.ImportAccounts)
 	admin.POST("/accounts", h.AddAccount)
 	admin.DELETE("/accounts/:source/:id", h.DeleteAccount)
 	admin.POST("/accounts/:source/:id/status", h.UpdateAccountStatus)
@@ -119,7 +120,7 @@ func TestAdminHandlerAddsListsAndDeletesFreeAccount(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &exported); err != nil {
 		t.Fatalf("decode export: %v", err)
 	}
-	if exported.Format != "aurora-account-export" || exported.Version != 1 || len(exported.Accounts) != 1 {
+	if exported.Format != "aurora-account-export" || exported.Version != 2 || len(exported.Accounts) != 1 {
 		t.Fatalf("unexpected export: %#v", exported)
 	}
 	if exported.Accounts[0].Source != "free" || exported.Accounts[0].Token != credential {
@@ -135,6 +136,44 @@ func TestAdminHandlerAddsListsAndDeletesFreeAccount(t *testing.T) {
 	}
 	if _, err := pool.Acquire(accounts.TypeNoAuth); err != accounts.ErrNoAvailable {
 		t.Fatalf("removed account still available: %v", err)
+	}
+
+	body, _ = json.Marshal(exported)
+	request = httptest.NewRequest(http.MethodPost, "/admin/api/accounts/import", bytes.NewReader(body))
+	request.Header.Set("Authorization", "Bearer admin-secret")
+	request.Header.Set("Content-Type", "application/json")
+	response = httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("import status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if bytes.Contains(response.Body.Bytes(), []byte(credential)) {
+		t.Fatal("import response leaked an account credential")
+	}
+	var imported accountImportResult
+	if err := json.Unmarshal(response.Body.Bytes(), &imported); err != nil {
+		t.Fatalf("decode import response: %v", err)
+	}
+	if imported.Imported != 1 || imported.Skipped != 0 || imported.Pending != 0 {
+		t.Fatalf("unexpected import result: %#v", imported)
+	}
+	if _, err := pool.Acquire(accounts.TypeNoAuth); err != nil {
+		t.Fatalf("imported account not available in pool: %v", err)
+	}
+
+	request = httptest.NewRequest(http.MethodPost, "/admin/api/accounts/import", bytes.NewReader(body))
+	request.Header.Set("Authorization", "Bearer admin-secret")
+	request.Header.Set("Content-Type", "application/json")
+	response = httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("duplicate import status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &imported); err != nil {
+		t.Fatalf("decode duplicate import response: %v", err)
+	}
+	if imported.Imported != 0 || imported.Skipped != 1 {
+		t.Fatalf("unexpected duplicate import result: %#v", imported)
 	}
 }
 

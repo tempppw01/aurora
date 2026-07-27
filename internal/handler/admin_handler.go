@@ -91,9 +91,20 @@ type accountExport struct {
 }
 
 type exportedManagedAccount struct {
-	Source string `json:"source"`
-	Token  string `json:"token"`
-	TeamID string `json:"team_id,omitempty"`
+	Source     string `json:"source"`
+	Token      string `json:"token"`
+	TeamID     string `json:"team_id,omitempty"`
+	Email      string `json:"email,omitempty"`
+	ImportedAt string `json:"imported_at,omitempty"`
+	Status     string `json:"status,omitempty"`
+}
+
+// accountImportResult reports only aggregate import outcomes. It deliberately
+// never includes credential values received from an account backup.
+type accountImportResult struct {
+	Imported int `json:"imported"`
+	Skipped  int `json:"skipped"`
+	Pending  int `json:"pending_renewal"`
 }
 
 // AdminHandler exposes the local account files through a deliberately
@@ -270,16 +281,21 @@ func (h *AdminHandler) ExportAccounts(c *gin.Context) {
 	now := time.Now().UTC()
 	backup := accountExport{
 		Format:     "aurora-account-export",
-		Version:    1,
+		Version:    2,
 		ExportedAt: now.Format(time.RFC3339),
 		Accounts:   make([]exportedManagedAccount, 0),
 	}
+	metadata := h.loadMetadata()
 	for _, source := range []string{"access", "session", "refresh", "free"} {
 		for _, entry := range accounts.LoadTokensFromFile(h.files[source]) {
+			meta := metadata[managedAccountID(source, entry.Token)]
 			backup.Accounts = append(backup.Accounts, exportedManagedAccount{
-				Source: source,
-				Token:  entry.Token,
-				TeamID: entry.TeamID,
+				Source:     source,
+				Token:      entry.Token,
+				TeamID:     entry.TeamID,
+				Email:      meta.Email,
+				ImportedAt: meta.ImportedAt,
+				Status:     meta.Status,
 			})
 		}
 	}
@@ -291,6 +307,119 @@ func (h *AdminHandler) ExportAccounts(c *gin.Context) {
 	c.Header("Pragma", "no-cache")
 	c.Header("X-Content-Type-Options", "nosniff")
 	c.JSON(http.StatusOK, backup)
+}
+
+// ImportAccounts restores an account backup produced by ExportAccounts. The
+// format marker prevents accidentally treating an arbitrary JSON file as a
+// credential backup; duplicates are safely skipped rather than overwritten.
+func (h *AdminHandler) ImportAccounts(c *gin.Context) {
+	var backup accountExport
+	if err := c.ShouldBindJSON(&backup); err != nil {
+		respondError(c, http.StatusBadRequest, errors.New("backup must be proper JSON"))
+		return
+	}
+	if backup.Format != "aurora-account-export" || (backup.Version != 1 && backup.Version != 2) {
+		respondError(c, http.StatusBadRequest, errors.New("unsupported account backup format"))
+		return
+	}
+	if len(backup.Accounts) == 0 {
+		respondError(c, http.StatusBadRequest, errors.New("account backup contains no accounts"))
+		return
+	}
+	if len(backup.Accounts) > 500 {
+		respondError(c, http.StatusBadRequest, errors.New("account backup exceeds the 500-account import limit"))
+		return
+	}
+	for _, entry := range backup.Accounts {
+		if err := validateExportedAccount(entry); err != nil {
+			respondError(c, http.StatusBadRequest, err)
+			return
+		}
+	}
+
+	result := accountImportResult{}
+	for _, entry := range backup.Accounts {
+		state, imported, err := h.importExportedAccount(entry)
+		if err != nil {
+			respondError(c, http.StatusBadRequest, err)
+			return
+		}
+		if !imported {
+			result.Skipped++
+			continue
+		}
+		result.Imported++
+		if state == "stored_pending_renewal" {
+			result.Pending++
+		}
+	}
+	c.JSON(http.StatusCreated, result)
+}
+
+func (h *AdminHandler) importExportedAccount(entry exportedManagedAccount) (string, bool, error) {
+	req := addManagedAccountRequest{
+		Source: strings.ToLower(strings.TrimSpace(entry.Source)),
+		Token:  strings.TrimSpace(entry.Token),
+		TeamID: strings.TrimSpace(entry.TeamID),
+	}
+	if err := validateExportedAccount(entry); err != nil {
+		return "", false, err
+	}
+
+	accountFileMu.Lock()
+	defer accountFileMu.Unlock()
+	path := h.files[req.Source]
+	for _, existing := range accounts.LoadTokensFromFile(path) {
+		if existing.Token == req.Token {
+			return "", false, nil
+		}
+	}
+
+	acct, state, err := h.newManagedAccount(req)
+	if err != nil {
+		return "", false, err
+	}
+	if err := appendCredential(path, req.Token, req.TeamID); err != nil {
+		return "", false, fmt.Errorf("save imported account: %w", err)
+	}
+	metadata := h.loadMetadata()
+	importedAt := strings.TrimSpace(entry.ImportedAt)
+	if _, err := time.Parse(time.RFC3339, importedAt); err != nil {
+		importedAt = time.Now().UTC().Format(time.RFC3339)
+	}
+	status := state
+	if entry.Status == accounts.StatusDisabled.String() {
+		acct.Status = accounts.StatusDisabled
+		status = accounts.StatusDisabled.String()
+	}
+	email := strings.TrimSpace(entry.Email)
+	if email == "" {
+		email = emailFromCredential(req.Token)
+	}
+	metadata[managedAccountID(req.Source, req.Token)] = accountMetadata{
+		Email:      email,
+		ImportedAt: importedAt,
+		Status:     status,
+	}
+	if err := h.saveMetadata(metadata); err != nil {
+		return "", false, fmt.Errorf("save imported account metadata: %w", err)
+	}
+	h.pool.AddAccount(acct)
+	return state, true, nil
+}
+
+func validateExportedAccount(entry exportedManagedAccount) error {
+	source := strings.ToLower(strings.TrimSpace(entry.Source))
+	token := strings.TrimSpace(entry.Token)
+	if source != "access" && source != "refresh" && source != "session" && source != "free" || token == "" {
+		return errors.New("backup contains an account with an invalid source or empty token")
+	}
+	if source == "free" {
+		if _, err := uuid.Parse(token); err != nil {
+			return errors.New("backup contains an invalid UUID device account")
+		}
+	}
+	return nil
 }
 
 // CheckAccountHealth performs the same Sentinel authentication preparation as

@@ -71,6 +71,7 @@ func RegisterRouter(accountPool *accounts.Pool, cfg *config.Config) *gin.Engine 
 	adminGroup.GET("/request-logs", adminHandler.ListRequestLogs)
 	adminGroup.DELETE("/request-logs", adminHandler.ClearRequestLogs)
 	adminGroup.GET("/accounts/export", adminHandler.ExportAccounts)
+	adminGroup.POST("/accounts/import", adminHandler.ImportAccounts)
 	adminGroup.POST("/accounts", adminHandler.AddAccount)
 	adminGroup.DELETE("/accounts/:source/:id", adminHandler.DeleteAccount)
 	adminGroup.POST("/accounts/:source/:id/health", adminHandler.CheckAccountHealth)
