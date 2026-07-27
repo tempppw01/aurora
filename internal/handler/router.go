@@ -73,6 +73,7 @@ func RegisterRouter(accountPool *accounts.Pool, cfg *config.Config) *gin.Engine 
 	adminGroup.GET("/accounts/export", adminHandler.ExportAccounts)
 	adminGroup.POST("/accounts/import", adminHandler.ImportAccounts)
 	adminGroup.POST("/accounts", adminHandler.AddAccount)
+	adminGroup.POST("/accounts/batch", adminHandler.BatchAccounts)
 	adminGroup.DELETE("/accounts/:source/:id", adminHandler.DeleteAccount)
 	adminGroup.POST("/accounts/:source/:id/health", adminHandler.CheckAccountHealth)
 	adminGroup.POST("/accounts/:source/:id/status", adminHandler.UpdateAccountStatus)

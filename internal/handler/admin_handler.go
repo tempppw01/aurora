@@ -74,6 +74,25 @@ type accountStatusRequest struct {
 	Enabled *bool `json:"enabled"`
 }
 
+// batchAccountRequest deliberately accepts account IDs only. Credentials are
+// resolved from the server-side account files and are never sent back to the
+// browser during a bulk operation.
+type batchAccountRequest struct {
+	Action   string                  `json:"action"`
+	Accounts []batchAccountReference `json:"accounts"`
+}
+
+type batchAccountReference struct {
+	Source string `json:"source"`
+	ID     string `json:"id"`
+}
+
+type batchAccountTarget struct {
+	Source     string
+	ID         string
+	Credential string
+}
+
 type schedulingRequest struct {
 	Mode            string `json:"mode"`
 	PreferredSource string `json:"preferred_source"`
@@ -485,6 +504,152 @@ func (h *AdminHandler) CheckAccountHealth(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"alive": alive, "status": status, "health": health, "checked_at": checkedAt, "message": message})
+}
+
+// BatchAccounts applies a status change or deletion to multiple saved
+// accounts. It keeps credentials server-side and validates every target before
+// making a persistent change, so a stale selection cannot partially act on a
+// different account.
+func (h *AdminHandler) BatchAccounts(c *gin.Context) {
+	var req batchAccountRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		respondError(c, http.StatusBadRequest, errors.New("request must be proper JSON"))
+		return
+	}
+	req.Action = strings.ToLower(strings.TrimSpace(req.Action))
+	if req.Action != "enable" && req.Action != "disable" && req.Action != "delete" {
+		respondError(c, http.StatusBadRequest, errors.New("action must be enable, disable, or delete"))
+		return
+	}
+	if len(req.Accounts) == 0 || len(req.Accounts) > 200 {
+		respondError(c, http.StatusBadRequest, errors.New("select between 1 and 200 accounts"))
+		return
+	}
+
+	accountFileMu.Lock()
+	defer accountFileMu.Unlock()
+
+	entriesBySource := make(map[string][]accounts.RawToken, len(h.files))
+	for source, path := range h.files {
+		entriesBySource[source] = accounts.LoadTokensFromFile(path)
+	}
+
+	seen := make(map[string]struct{}, len(req.Accounts))
+	targets := make([]batchAccountTarget, 0, len(req.Accounts))
+	for _, ref := range req.Accounts {
+		source := strings.ToLower(strings.TrimSpace(ref.Source))
+		id := strings.TrimSpace(ref.ID)
+		_, ok := h.files[source]
+		key := source + ":" + id
+		if !ok || id == "" || key == ":" {
+			respondError(c, http.StatusBadRequest, errors.New("invalid account reference"))
+			return
+		}
+		if _, duplicate := seen[key]; duplicate {
+			respondError(c, http.StatusBadRequest, errors.New("duplicate account reference"))
+			return
+		}
+		seen[key] = struct{}{}
+
+		credential := ""
+		for _, entry := range entriesBySource[source] {
+			if managedAccountID(source, entry.Token) == id {
+				credential = entry.Token
+				break
+			}
+		}
+		if credential == "" {
+			respondError(c, http.StatusNotFound, errors.New("one or more selected accounts no longer exist; refresh and try again"))
+			return
+		}
+		targets = append(targets, batchAccountTarget{Source: source, ID: id, Credential: credential})
+	}
+
+	metadata := h.loadMetadata()
+	if req.Action == "enable" || req.Action == "disable" {
+		if h.pool == nil {
+			respondError(c, http.StatusConflict, errors.New("account pool is unavailable"))
+			return
+		}
+		for _, target := range targets {
+			if h.pool.FindByCredential(target.Credential) == nil {
+				respondError(c, http.StatusConflict, errors.New("one or more selected accounts are not loaded; restart the service and try again"))
+				return
+			}
+		}
+
+		status := accounts.StatusDisabled
+		if req.Action == "enable" {
+			status = accounts.StatusActive
+		}
+		previous := make(map[string]accounts.AccountStatus, len(targets))
+		for _, target := range targets {
+			old, _ := h.pool.SetStatusByCredential(target.Credential, status)
+			previous[target.Source+":"+target.ID] = old
+			meta := metadata[target.ID]
+			if meta.Email == "" {
+				meta.Email = emailFromCredential(target.Credential)
+			}
+			meta.Status = status.String()
+			metadata[target.ID] = meta
+		}
+		if err := h.saveMetadata(metadata); err != nil {
+			for _, target := range targets {
+				_, _ = h.pool.SetStatusByCredential(target.Credential, previous[target.Source+":"+target.ID])
+			}
+			respondError(c, http.StatusInternalServerError, fmt.Errorf("account statuses changed in memory but could not be saved: %w", err))
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"action": req.Action, "updated": len(targets)})
+		return
+	}
+
+	selected := make(map[string]map[string]struct{}, len(h.files))
+	for _, target := range targets {
+		if selected[target.Source] == nil {
+			selected[target.Source] = make(map[string]struct{})
+		}
+		selected[target.Source][target.ID] = struct{}{}
+	}
+	keptBySource := make(map[string][]accounts.RawToken, len(selected))
+	for source, ids := range selected {
+		entries := entriesBySource[source]
+		kept := make([]accounts.RawToken, 0, len(entries))
+		for _, entry := range entries {
+			if _, remove := ids[managedAccountID(source, entry.Token)]; !remove {
+				kept = append(kept, entry)
+			}
+		}
+		keptBySource[source] = kept
+	}
+
+	writtenSources := make([]string, 0, len(keptBySource))
+	for source, kept := range keptBySource {
+		if err := writeCredentials(h.files[source], kept); err != nil {
+			for _, written := range writtenSources {
+				_ = writeCredentials(h.files[written], entriesBySource[written])
+			}
+			respondError(c, http.StatusInternalServerError, err)
+			return
+		}
+		writtenSources = append(writtenSources, source)
+	}
+	for _, target := range targets {
+		delete(metadata, target.ID)
+	}
+	if err := h.saveMetadata(metadata); err != nil {
+		for _, source := range writtenSources {
+			_ = writeCredentials(h.files[source], entriesBySource[source])
+		}
+		respondError(c, http.StatusInternalServerError, fmt.Errorf("accounts were removed but account metadata could not be updated: %w", err))
+		return
+	}
+	if h.pool != nil {
+		for _, target := range targets {
+			h.pool.RemoveAccountByCredential(target.Credential)
+		}
+	}
+	c.JSON(http.StatusOK, gin.H{"action": req.Action, "updated": len(targets)})
 }
 
 // UpdateAccountStatus enables or disables a persisted account. Disabled

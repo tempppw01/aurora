@@ -33,6 +33,7 @@ func TestAdminHandlerAddsListsAndDeletesFreeAccount(t *testing.T) {
 	admin.GET("/accounts/export", h.ExportAccounts)
 	admin.POST("/accounts/import", h.ImportAccounts)
 	admin.POST("/accounts", h.AddAccount)
+	admin.POST("/accounts/batch", h.BatchAccounts)
 	admin.DELETE("/accounts/:source/:id", h.DeleteAccount)
 	admin.POST("/accounts/:source/:id/status", h.UpdateAccountStatus)
 
@@ -174,6 +175,84 @@ func TestAdminHandlerAddsListsAndDeletesFreeAccount(t *testing.T) {
 	}
 	if imported.Imported != 0 || imported.Skipped != 1 {
 		t.Fatalf("unexpected duplicate import result: %#v", imported)
+	}
+}
+
+func TestAdminHandlerBatchAccountActions(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	pool := accounts.NewPool(nil)
+	h := NewAdminHandler(pool, &config.Config{AdminToken: "admin-secret"})
+	dir := t.TempDir()
+	h.files = map[string]string{
+		"access":  filepath.Join(dir, "access_tokens.txt"),
+		"refresh": filepath.Join(dir, "refresh_tokens.txt"),
+		"session": filepath.Join(dir, "session_tokens.txt"),
+		"free":    filepath.Join(dir, "free_tokens.txt"),
+	}
+	h.metadataPath = filepath.Join(dir, "account_metadata.json")
+
+	router := gin.New()
+	admin := router.Group("/admin/api").Use(h.Authorize)
+	admin.GET("/accounts", h.ListAccounts)
+	admin.POST("/accounts", h.AddAccount)
+	admin.POST("/accounts/batch", h.BatchAccounts)
+
+	for _, credential := range []string{
+		"9ca8b1b6-707f-4c1b-a1e0-d007839ae597",
+		"223e4567-e89b-42d3-a456-426614174000",
+	} {
+		body, _ := json.Marshal(addManagedAccountRequest{Source: "free", Token: credential})
+		request := httptest.NewRequest(http.MethodPost, "/admin/api/accounts", bytes.NewReader(body))
+		request.Header.Set("Authorization", "Bearer admin-secret")
+		request.Header.Set("Content-Type", "application/json")
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, request)
+		if response.Code != http.StatusCreated {
+			t.Fatalf("add account status = %d, body = %s", response.Code, response.Body.String())
+		}
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/admin/api/accounts", nil)
+	request.Header.Set("Authorization", "Bearer admin-secret")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	var listed struct {
+		Data []managedAccount `json:"data"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &listed); err != nil || len(listed.Data) != 2 {
+		t.Fatalf("list accounts = %s, err = %v", response.Body.String(), err)
+	}
+	references := []batchAccountReference{{Source: listed.Data[0].Source, ID: listed.Data[0].ID}, {Source: listed.Data[1].Source, ID: listed.Data[1].ID}}
+
+	body, _ := json.Marshal(batchAccountRequest{Action: "disable", Accounts: references})
+	request = httptest.NewRequest(http.MethodPost, "/admin/api/accounts/batch", bytes.NewReader(body))
+	request.Header.Set("Authorization", "Bearer admin-secret")
+	request.Header.Set("Content-Type", "application/json")
+	response = httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("batch disable status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if _, err := pool.Acquire(accounts.TypeNoAuth); err != accounts.ErrNoAvailable {
+		t.Fatalf("batch disabled accounts are still available: %v", err)
+	}
+
+	body, _ = json.Marshal(batchAccountRequest{Action: "delete", Accounts: references})
+	request = httptest.NewRequest(http.MethodPost, "/admin/api/accounts/batch", bytes.NewReader(body))
+	request.Header.Set("Authorization", "Bearer admin-secret")
+	request.Header.Set("Content-Type", "application/json")
+	response = httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("batch delete status = %d, body = %s", response.Code, response.Body.String())
+	}
+
+	request = httptest.NewRequest(http.MethodGet, "/admin/api/accounts", nil)
+	request.Header.Set("Authorization", "Bearer admin-secret")
+	response = httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if err := json.Unmarshal(response.Body.Bytes(), &listed); err != nil || len(listed.Data) != 0 {
+		t.Fatalf("accounts after batch delete = %s, err = %v", response.Body.String(), err)
 	}
 }
 
