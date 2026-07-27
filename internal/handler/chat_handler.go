@@ -325,6 +325,10 @@ func (h *ChatHandler) Responses(c *gin.Context) {
 	}
 
 	streamResponses := responsesRequest.Stream && h.cfg.StreamMode
+	startedAt := time.Now()
+	responseID := "resp_" + uuid.NewString()
+	reasoningItemID := "rs_" + uuid.NewString()
+	messageItemID := "msg_" + uuid.NewString()
 	response, wsConn, _, status, err := conversationClientOrder(&client, account, translated_request, proxyUrl, streamResponses, clientState, h.accountPool)
 	if err != nil {
 		c.JSON(status, gin.H{"error": gin.H{
@@ -349,10 +353,40 @@ func (h *ChatHandler) Responses(c *gin.Context) {
 		c.Writer.Header().Set("Connection", "keep-alive")
 		c.Writer.Header().Set("X-Accel-Buffering", "no")
 		c.Writer.WriteHeader(200)
-		writeResponsesStreamEvent(c, "response.created", officialtypes.ResponsesCreated(officialtypes.NewResponsesResponse("", input_tokens, 0, reqModel)))
+		created := officialtypes.NewResponsesResponse("", "", input_tokens, 0, 0, reqModel)
+		created.ID = responseID
+		created.Status = "in_progress"
+		created.Output = nil
+		writeResponsesStreamEvent(c, "response.created", officialtypes.ResponsesCreated(created))
 	}
 
 	var full_response string
+	var full_thinking string
+	reasoningAdded, messageAdded := false, false
+	reasoningIndex, messageIndex := 0, 0
+	firstOutputAt := int64(0)
+	ensureReasoningItem := func() {
+		if !streamResponses || reasoningAdded {
+			return
+		}
+		if messageAdded {
+			reasoningIndex = 1
+		} else {
+			messageIndex = 1
+		}
+		reasoningAdded = true
+		writeResponsesStreamEvent(c, "response.output_item.added", officialtypes.ResponsesOutputItemAdded(reasoningIndex, reasoningItemID, "reasoning"))
+	}
+	ensureMessageItem := func() {
+		if !streamResponses || messageAdded {
+			return
+		}
+		if reasoningAdded {
+			messageIndex = 1
+		}
+		messageAdded = true
+		writeResponsesStreamEvent(c, "response.output_item.added", officialtypes.ResponsesOutputItemAdded(messageIndex, messageItemID, "message"))
+	}
 	for i := h.cfg.MaxContinueCount; i > 0; i-- {
 		var continue_info *chatgpt.ContinueInfo
 		var response_part string
@@ -361,12 +395,24 @@ func (h *ChatHandler) Responses(c *gin.Context) {
 			ClientState:          clientState,
 			SuppressStreamOutput: streamResponses,
 			OnTextDelta: func(delta string) {
-				writeResponsesStreamEvent(c, "response.output_text.delta", officialtypes.ResponsesTextDelta(delta))
+				ensureMessageItem()
+				if firstOutputAt == 0 {
+					firstOutputAt = time.Since(startedAt).Milliseconds()
+				}
+				writeResponsesStreamEvent(c, "response.output_text.delta", officialtypes.ResponsesTextDeltaEvent{Type: "response.output_text.delta", ItemID: messageItemID, OutputIndex: messageIndex, ContentIndex: 0, Delta: delta}.String())
+			},
+			OnThinkingDelta: func(delta string) {
+				ensureReasoningItem()
+				if firstOutputAt == 0 {
+					firstOutputAt = time.Since(startedAt).Milliseconds()
+				}
+				writeResponsesStreamEvent(c, "response.reasoning_text.delta", officialtypes.ResponsesReasoningDeltaEvent{Type: "response.reasoning_text.delta", ItemID: reasoningItemID, OutputIndex: reasoningIndex, ContentIndex: 0, Delta: delta}.String())
 			},
 		})
 		wsConn = nil
 		response_part, continue_info = result.Text, result.Continue
 		full_response += response_part
+		full_thinking += result.ThinkingText
 		parentMessageID := result.ParentMessageID
 		if continue_info != nil {
 			parentMessageID = continue_info.ParentID
@@ -386,7 +432,7 @@ func (h *ChatHandler) Responses(c *gin.Context) {
 		response, wsConn, _, status, err = conversationClientOrder(&client, account, translated_request, proxyUrl, streamResponses, clientState, h.accountPool)
 		if err != nil {
 			if streamResponses {
-				writeResponsesStreamEvent(c, "error", fmt.Sprintf(`{"error":{"message":%q,"type":"request_conversion_error"}}`, err.Error()))
+				writeResponsesStreamEvent(c, "response.failed", officialtypes.ResponsesFailed(err.Error()))
 				writeResponsesStreamDone(c)
 				return
 			}
@@ -405,6 +451,7 @@ func (h *ChatHandler) Responses(c *gin.Context) {
 				wsConn = nil
 			}
 			if streamResponses {
+				writeResponsesStreamEvent(c, "response.failed", officialtypes.ResponsesFailed("upstream error"))
 				writeResponsesStreamDone(c)
 			}
 			return
@@ -415,11 +462,27 @@ func (h *ChatHandler) Responses(c *gin.Context) {
 	}
 
 	output_tokens := util.CountToken(full_response)
-	responsesResponse := officialtypes.NewResponsesResponse(full_response, input_tokens, output_tokens, reqModel)
+	reasoningTokens := util.CountToken(full_thinking)
+	responsesResponse := officialtypes.NewResponsesResponse(full_response, full_thinking, input_tokens, output_tokens, reasoningTokens, reqModel)
 	if !streamResponses {
 		c.JSON(200, responsesResponse)
 		return
 	}
+	ensureMessageItem()
+	if reasoningAdded {
+		writeResponsesStreamEvent(c, "response.output_item.done", officialtypes.ResponsesOutputItemDone(reasoningIndex, reasoningItemID, "reasoning", full_thinking))
+	}
+	writeResponsesStreamEvent(c, "response.output_item.done", officialtypes.ResponsesOutputItemDone(messageIndex, messageItemID, "message", full_response))
+	responsesResponse.ID = responseID
+	for i := range responsesResponse.Output {
+		if responsesResponse.Output[i].Type == "reasoning" {
+			responsesResponse.Output[i].ID = reasoningItemID
+		} else {
+			responsesResponse.Output[i].ID = messageItemID
+		}
+	}
+	responsesResponse.MsSinceStart = time.Since(startedAt).Milliseconds()
+	responsesResponse.MsTTFT = firstOutputAt
 
 	writeResponsesStreamEvent(c, "response.completed", officialtypes.ResponsesCompleted(responsesResponse))
 	writeResponsesStreamDone(c)

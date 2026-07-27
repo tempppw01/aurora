@@ -1,6 +1,9 @@
 package official
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"time"
+)
 
 type ChatCompletionChunk struct {
 	ID             string                 `json:"id"`
@@ -41,9 +44,9 @@ type Delta struct {
 // ToolCallDelta 是 OpenAI 协议里 delta.tool_calls 元素的最小形态:
 // 流式响应中 name / arguments 按"先 name 后 arguments"分块发出。
 type ToolCallDelta struct {
-	Index    int             `json:"index"`
-	ID       string          `json:"id,omitempty"`
-	Type     string          `json:"type,omitempty"`
+	Index    int               `json:"index"`
+	ID       string            `json:"id,omitempty"`
+	Type     string            `json:"type,omitempty"`
 	Function ToolCallFuncDelta `json:"function"`
 }
 
@@ -246,36 +249,28 @@ func derefString(p *string) string {
 }
 
 type ResponsesResponse struct {
-	ID         string            `json:"id"`
-	Object     string            `json:"object"`
-	CreatedAt  int64             `json:"created_at"`
-	Status     string            `json:"status"`
-	Model      string            `json:"model"`
-	Output     []ResponsesOutput `json:"output"`
-	OutputText string            `json:"output_text"`
-	Usage      usage             `json:"usage"`
-}
-
-type ResponsesOutput struct {
-	ID      string             `json:"id"`
-	Type    string             `json:"type"`
-	Status  string             `json:"status"`
-	Role    string             `json:"role"`
-	Content []ResponsesContent `json:"content"`
-}
-
-type ResponsesContent struct {
-	Type        string        `json:"type"`
-	Text        string        `json:"text"`
-	Annotations []interface{} `json:"annotations"`
+	ID               string                `json:"id"`
+	Object           string                `json:"object"`
+	CreatedAt        int64                 `json:"created_at"`
+	Status           string                `json:"status"`
+	Model            string                `json:"model"`
+	Output           []ResponsesOutputItem `json:"output"`
+	OutputText       string                `json:"output_text"`
+	Usage            ResponsesUsage        `json:"usage"`
+	ReasoningContent string                `json:"reasoning_content,omitempty"`
+	MsSinceStart     int64                 `json:"ms_since_start,omitempty"`
+	MsTTFT           int64                 `json:"ms_ttft,omitempty"`
 }
 
 type ResponsesTextDeltaEvent struct {
 	Type         string `json:"type"`
-	Delta        string `json:"delta"`
+	ItemID       string `json:"item_id,omitempty"`
 	OutputIndex  int    `json:"output_index"`
 	ContentIndex int    `json:"content_index"`
+	Delta        string `json:"delta"`
 }
+
+func (e ResponsesTextDeltaEvent) String() string { data, _ := json.Marshal(e); return string(data) }
 
 type ResponsesCreatedEvent struct {
 	Type     string            `json:"type"`
@@ -287,38 +282,49 @@ type ResponsesCompletedEvent struct {
 	Response ResponsesResponse `json:"response"`
 }
 
-func NewResponsesResponse(text string, inputTokens, outputTokens int, model string) ResponsesResponse {
+// NewResponsesResponse returns OpenAI Responses-compatible usage and output
+// structures. Aurora does not claim cache usage because the upstream does not
+// expose real cache metrics.
+func NewResponsesResponse(text, reasoning string, inputTokens, outputTokens, reasoningTokens int, model string) ResponsesResponse {
 	if model == "" {
 		model = "auto"
 	}
-	return ResponsesResponse{
-		ID:         "resp_QXlha2FBbmROaXhpZUFyZUF3ZXNvbWUK",
-		Object:     "response",
-		CreatedAt:  int64(0),
-		Status:     "completed",
-		Model:      model,
-		OutputText: text,
-		Usage: usage{
-			PromptTokens:     inputTokens,
-			CompletionTokens: outputTokens,
-			TotalTokens:      inputTokens + outputTokens,
+	response := ResponsesResponse{
+		ID:               "resp_QXlha2FBbmROaXhpZUFyZUF3ZXNvbWUK",
+		Object:           "response",
+		CreatedAt:        time.Now().Unix(),
+		Status:           "completed",
+		Model:            model,
+		OutputText:       text,
+		ReasoningContent: reasoning,
+		Usage: ResponsesUsage{
+			InputTokens:         inputTokens,
+			OutputTokens:        outputTokens,
+			OutputTokensDetails: ResponsesOutputTokensDetails{ReasoningTokens: reasoningTokens},
+			TotalTokens:         inputTokens + outputTokens,
 		},
-		Output: []ResponsesOutput{
+		Output: []ResponsesOutputItem{
 			{
 				ID:     "msg_QXlha2FBbmROaXhpZUFyZUF3ZXNvbWUK",
 				Type:   "message",
 				Status: "completed",
 				Role:   "assistant",
-				Content: []ResponsesContent{
+				Content: []ResponsesContentPart{
 					{
-						Type:        "output_text",
-						Text:        text,
-						Annotations: []interface{}{},
+						Type: "output_text",
+						Text: text,
 					},
 				},
 			},
 		},
 	}
+	if reasoning != "" {
+		response.Output = append([]ResponsesOutputItem{{
+			ID: "rs_QXlha2FBbmROaXhpZUFyZUF3ZXNvbWUK", Type: "reasoning", Status: "completed",
+			Content: []ResponsesContentPart{{Type: "reasoning_text", Text: reasoning}},
+		}}, response.Output...)
+	}
+	return response
 }
 
 func ResponsesTextDelta(text string) string {
@@ -330,6 +336,83 @@ func ResponsesTextDelta(text string) string {
 	}
 	resp, _ := json.Marshal(event)
 	return string(resp)
+}
+
+// ResponsesUsage mirrors the public Responses API usage shape. Cache values
+// remain zero unless a future upstream source can provide real measurements.
+type ResponsesUsage struct {
+	InputTokens         int                          `json:"input_tokens"`
+	InputTokensDetails  ResponsesInputTokensDetails  `json:"input_tokens_details"`
+	OutputTokens        int                          `json:"output_tokens"`
+	OutputTokensDetails ResponsesOutputTokensDetails `json:"output_tokens_details"`
+	TotalTokens         int                          `json:"total_tokens"`
+}
+
+type ResponsesInputTokensDetails struct {
+	CachedTokens     int `json:"cached_tokens"`
+	CacheWriteTokens int `json:"cache_write_tokens"`
+}
+
+type ResponsesOutputTokensDetails struct {
+	ReasoningTokens int `json:"reasoning_tokens"`
+}
+
+type ResponsesOutputItem struct {
+	ID      string                 `json:"id"`
+	Type    string                 `json:"type"`
+	Status  string                 `json:"status,omitempty"`
+	Role    string                 `json:"role,omitempty"`
+	Content []ResponsesContentPart `json:"content"`
+}
+
+type ResponsesContentPart struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}
+
+type ResponsesReasoningDeltaEvent struct {
+	Type         string `json:"type"`
+	ItemID       string `json:"item_id"`
+	OutputIndex  int    `json:"output_index"`
+	ContentIndex int    `json:"content_index"`
+	Delta        string `json:"delta"`
+}
+
+func (e ResponsesReasoningDeltaEvent) String() string {
+	data, _ := json.Marshal(e)
+	return string(data)
+}
+
+type ResponsesOutputItemEvent struct {
+	Type        string              `json:"type"`
+	OutputIndex int                 `json:"output_index"`
+	Item        ResponsesOutputItem `json:"item"`
+}
+
+func ResponsesOutputItemAdded(outputIndex int, itemID, itemType string) string {
+	return responsesOutputItemEvent("response.output_item.added", outputIndex, itemID, itemType, "in_progress", "")
+}
+
+func ResponsesOutputItemDone(outputIndex int, itemID, itemType, text string) string {
+	return responsesOutputItemEvent("response.output_item.done", outputIndex, itemID, itemType, "completed", text)
+}
+
+func responsesOutputItemEvent(eventType string, outputIndex int, itemID, itemType, status, text string) string {
+	item := ResponsesOutputItem{ID: itemID, Type: itemType, Status: status}
+	if itemType == "message" {
+		item.Role = "assistant"
+		item.Content = []ResponsesContentPart{{Type: "output_text", Text: text}}
+	}
+	if itemType == "reasoning" {
+		item.Content = []ResponsesContentPart{{Type: "reasoning_text", Text: text}}
+	}
+	data, _ := json.Marshal(ResponsesOutputItemEvent{Type: eventType, OutputIndex: outputIndex, Item: item})
+	return string(data)
+}
+
+func ResponsesFailed(message string) string {
+	data, _ := json.Marshal(map[string]interface{}{"type": "response.failed", "response": map[string]interface{}{"error": map[string]string{"message": message, "type": "server_error"}}})
+	return string(data)
 }
 
 func ResponsesCreated(response ResponsesResponse) string {

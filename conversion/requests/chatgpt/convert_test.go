@@ -30,6 +30,28 @@ func TestConvertAPIRequestNoToolsNoInjection(t *testing.T) {
 	}
 }
 
+func TestConvertAPIRequestMapsExtendedReasoningEffort(t *testing.T) {
+	cases := map[string]string{
+		"none":     "low",
+		"minimal":  "low",
+		"low":      "low",
+		"medium":   "medium",
+		"standard": "medium",
+		"high":     "high",
+		"xhigh":    "high",
+		"max":      "high",
+		"unknown":  "medium",
+	}
+	for effort, want := range cases {
+		t.Run(effort, func(t *testing.T) {
+			out := testConvert(t, official.APIRequest{ReasoningEffort: effort, Messages: []official.APIMessage{official.NewTextMessage("user", "hi")}})
+			if out.ThinkingEffort != want {
+				t.Fatalf("ThinkingEffort = %q, want %q", out.ThinkingEffort, want)
+			}
+		})
+	}
+}
+
 func TestConvertAPIRequestInjectsToolInstructions(t *testing.T) {
 	req := official.APIRequest{
 		Model: "gpt-5",

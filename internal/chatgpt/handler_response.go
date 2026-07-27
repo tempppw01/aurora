@@ -165,6 +165,9 @@ type HandlerDetailedOptions struct {
 	// from Chat Completions.
 	SuppressStreamOutput bool
 	OnTextDelta          func(string)
+	// OnThinkingDelta lets protocol adapters expose reasoning without changing
+	// the Chat Completions stream shape.
+	OnThinkingDelta func(string)
 }
 
 // HandlerDetailedWithOptions 处理对话响应流（最完整版）。
@@ -293,6 +296,9 @@ func HandlerDetailedWithOptions(c *gin.Context, response *http.Response, client 
 			return
 		}
 		thinkingText += delta
+		if options.OnThinkingDelta != nil {
+			options.OnThinkingDelta(delta)
+		}
 		emitSentinels([]map[string]interface{}{{
 			"event": "thinking",
 			"kind":  "analysis",

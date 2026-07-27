@@ -15,29 +15,29 @@ type APIRequest struct {
 	// - Tools:      客户端声明的可调用工具列表
 	// - ToolChoice: 强制 / 允许 / 禁止模型调用工具
 	// - ParallelToolCalls: 是否允许同一轮发起多个 tool_call(默认 true)
-	Tools              []Tool      `json:"tools,omitempty"`
-	ToolChoice         *ToolChoice `json:"tool_choice,omitempty"`
-	ParallelToolCalls  *bool       `json:"parallel_tool_calls,omitempty"`
+	Tools             []Tool      `json:"tools,omitempty"`
+	ToolChoice        *ToolChoice `json:"tool_choice,omitempty"`
+	ParallelToolCalls *bool       `json:"parallel_tool_calls,omitempty"`
 
 	// ── 标准生成参数 ──
-	Temperature         *float64   `json:"temperature,omitempty"`
-	TopP                *float64   `json:"top_p,omitempty"`
-	N                   *int       `json:"n,omitempty"`
-	Stop                *StopParam `json:"stop,omitempty"`
-	MaxTokens           *int       `json:"max_tokens,omitempty"`
-	MaxCompletionTokens *int       `json:"max_completion_tokens,omitempty"`
-	PresencePenalty     *float64   `json:"presence_penalty,omitempty"`
-	FrequencyPenalty    *float64   `json:"frequency_penalty,omitempty"`
+	Temperature         *float64    `json:"temperature,omitempty"`
+	TopP                *float64    `json:"top_p,omitempty"`
+	N                   *int        `json:"n,omitempty"`
+	Stop                *StopParam  `json:"stop,omitempty"`
+	MaxTokens           *int        `json:"max_tokens,omitempty"`
+	MaxCompletionTokens *int        `json:"max_completion_tokens,omitempty"`
+	PresencePenalty     *float64    `json:"presence_penalty,omitempty"`
+	FrequencyPenalty    *float64    `json:"frequency_penalty,omitempty"`
 	LogitBias           map[int]int `json:"logit_bias,omitempty"`
-	Seed                *int       `json:"seed,omitempty"`
+	Seed                *int        `json:"seed,omitempty"`
 
 	// ── 扩展参数 ──
-	ResponseFormat  *ResponseFormat  `json:"response_format,omitempty"`
-	ReasoningEffort string           `json:"reasoning_effort,omitempty"`
-	StreamOptions   *StreamOptions   `json:"stream_options,omitempty"`
-	User            string           `json:"user,omitempty"`
+	ResponseFormat  *ResponseFormat   `json:"response_format,omitempty"`
+	ReasoningEffort string            `json:"reasoning_effort,omitempty"`
+	StreamOptions   *StreamOptions    `json:"stream_options,omitempty"`
+	User            string            `json:"user,omitempty"`
 	Metadata        map[string]string `json:"metadata,omitempty"`
-	Store           *bool            `json:"store,omitempty"`
+	Store           *bool             `json:"store,omitempty"`
 }
 
 // StopParam 接受 string 或 []string。
@@ -94,7 +94,7 @@ type ToolFunction struct {
 //   - "any"     : 强制至少调用一个
 //   - &ToolChoice{Type: "function", Function: {Name: "X"}} : 强制调用 X
 type ToolChoice struct {
-	Type     string             `json:"type"`
+	Type     string              `json:"type"`
 	Function *ToolChoiceFunction `json:"function,omitempty"`
 }
 
@@ -390,7 +390,9 @@ type ResponseFormatText struct {
 
 // ReasoningConfig 对应 Responses API 的 reasoning 参数。
 type ReasoningConfig struct {
-	Effort string `json:"effort,omitempty"` // "low" | "medium" | "high"
+	Effort  string `json:"effort,omitempty"`  // none|minimal|low|medium|high|xhigh|max
+	Summary string `json:"summary,omitempty"` // auto|concise|detailed
+	Context string `json:"context,omitempty"` // auto|current_turn|all_turns
 }
 
 type responseInputMessage struct {
