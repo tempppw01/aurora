@@ -13,14 +13,34 @@ import (
 
 var ErrNoAvailable = errors.New("no available account of the requested type")
 
+type SchedulingMode string
+
+const (
+	ScheduleRoundRobin  SchedulingMode = "round_robin"
+	SchedulePreferred   SchedulingMode = "preferred"
+	ScheduleSuccessRate SchedulingMode = "success_rate"
+	ScheduleLeastUsed   SchedulingMode = "least_used"
+)
+
+func ParseSchedulingMode(value string) (SchedulingMode, bool) {
+	mode := SchedulingMode(value)
+	switch mode {
+	case ScheduleRoundRobin, SchedulePreferred, ScheduleSuccessRate, ScheduleLeastUsed:
+		return mode, true
+	}
+	return "", false
+}
+
 // Pool 账号池管理，按类型分三个数组，Acquire 直接取无需遍历
 // 临时账号存放在单独的 map[string]*Account 中,以 token hash 为 key
 type Pool struct {
-	mu      sync.Mutex
-	noauth  []*Account
-	free    []*Account
-	puid    []*Account
-	cursors [3]int // 0=noauth,1=free,2=puid
+	mu        sync.Mutex
+	noauth    []*Account
+	free      []*Account
+	puid      []*Account
+	cursors   [3]int // 0=noauth,1=free,2=puid
+	mode      SchedulingMode
+	preferred *Account
 
 	// 临时账号 (外部传入的 accessToken 创建的)
 	tempMu    sync.RWMutex
@@ -55,11 +75,31 @@ func (p *Pool) sliceFor(t AccountType) *[]*Account {
 func NewPool(initial []*Account) *Pool {
 	pool := &Pool{
 		temporary: make(map[string]*Account),
+		mode:      ScheduleRoundRobin,
 	}
 	for _, acct := range initial {
 		pool.AddAccount(acct)
 	}
 	return pool
+}
+
+// SetScheduling changes the selection behavior for all persistent account
+// types. A preferred account is used only for requests compatible with its
+// type and only while it remains active; other requests safely fall back.
+func (p *Pool) SetScheduling(mode SchedulingMode, preferred *Account) {
+	if _, ok := ParseSchedulingMode(string(mode)); !ok {
+		mode = ScheduleRoundRobin
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.mode = mode
+	p.preferred = preferred
+}
+
+func (p *Pool) SchedulingMode() SchedulingMode {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.mode
 }
 
 // AddAccount 按类型添加到对应数组
@@ -107,6 +147,9 @@ func (p *Pool) RemoveAccountByCredential(credential string) int {
 	p.puid = removeFrom(p.puid)
 	for i := range p.cursors {
 		p.cursors[i] = 0
+	}
+	if p.preferred != nil && (p.preferred.Token == credential || p.preferred.RefreshToken == credential || p.preferred.SessionToken == credential) {
+		p.preferred = nil
 	}
 	return removed
 }
@@ -167,16 +210,97 @@ func (p *Pool) Acquire(acctType AccountType) (*Account, error) {
 	}
 
 	entries := *slice
-	for i := 0; i < len(entries); i++ {
-		cur := (p.cursors[idx] + i) % len(entries)
-		if entries[cur].Status == StatusActive {
-			p.cursors[idx] = (cur + 1) % len(entries)
-			entries[cur].TotalCalls++
-			return entries[cur], nil
+	var selected int
+	switch p.mode {
+	case SchedulePreferred:
+		selected = p.preferredIndex(entries)
+	case ScheduleSuccessRate:
+		selected = p.bestSuccessRateIndex(entries, p.cursors[idx])
+	case ScheduleLeastUsed:
+		selected = p.leastUsedIndex(entries, p.cursors[idx])
+	default:
+		selected = -1
+	}
+	if selected < 0 {
+		selected = p.roundRobinIndex(entries, p.cursors[idx])
+	}
+	if selected < 0 {
+		return nil, ErrNoAvailable
+	}
+	p.cursors[idx] = (selected + 1) % len(entries)
+	entries[selected].TotalCalls++
+	return entries[selected], nil
+}
+
+func (p *Pool) preferredIndex(entries []*Account) int {
+	for index, account := range entries {
+		if account == p.preferred && account != nil && account.Status == StatusActive {
+			return index
 		}
 	}
+	return -1
+}
 
-	return nil, ErrNoAvailable
+func (p *Pool) roundRobinIndex(entries []*Account, cursor int) int {
+	for i := 0; i < len(entries); i++ {
+		index := (cursor + i) % len(entries)
+		if entries[index] != nil && entries[index].Status == StatusActive {
+			return index
+		}
+	}
+	return -1
+}
+
+func (p *Pool) leastUsedIndex(entries []*Account, cursor int) int {
+	selected := -1
+	for i := 0; i < len(entries); i++ {
+		index := (cursor + i) % len(entries)
+		account := entries[index]
+		if account == nil || account.Status != StatusActive {
+			continue
+		}
+		if selected < 0 || account.TotalCalls < entries[selected].TotalCalls {
+			selected = index
+		}
+	}
+	return selected
+}
+
+func (p *Pool) bestSuccessRateIndex(entries []*Account, cursor int) int {
+	selected := -1
+	for i := 0; i < len(entries); i++ {
+		index := (cursor + i) % len(entries)
+		account := entries[index]
+		if account == nil || account.Status != StatusActive {
+			continue
+		}
+		if selected < 0 || accountHasBetterSuccessRate(account, entries[selected]) {
+			selected = index
+		}
+	}
+	return selected
+}
+
+func accountHasBetterSuccessRate(candidate, current *Account) bool {
+	// Compare success ratios without floating-point rounding. Fresh accounts
+	// have no failure history and naturally tie with successful accounts; the
+	// lowest call count then prevents a single account from being monopolized.
+	candidateTotal := candidate.TotalCalls
+	if candidateTotal == 0 {
+		candidateTotal = 1
+	}
+	currentTotal := current.TotalCalls
+	if currentTotal == 0 {
+		currentTotal = 1
+	}
+	candidateSuccess := candidateTotal - candidate.FailedCalls
+	currentSuccess := currentTotal - current.FailedCalls
+	left := candidateSuccess * currentTotal
+	right := currentSuccess * candidateTotal
+	if left != right {
+		return left > right
+	}
+	return candidate.TotalCalls < current.TotalCalls
 }
 
 // Release 保留接口但不再需要主动调用（统计在 Acquire 时已更新）。

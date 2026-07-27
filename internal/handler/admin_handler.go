@@ -74,6 +74,12 @@ type accountStatusRequest struct {
 	Enabled *bool `json:"enabled"`
 }
 
+type schedulingRequest struct {
+	Mode            string `json:"mode"`
+	PreferredSource string `json:"preferred_source"`
+	PreferredID     string `json:"preferred_id"`
+}
+
 // accountExport is a portable, intentionally credential-bearing backup. It is
 // exposed only by the separately authorized management API and must never be
 // returned from the normal account listing endpoint.
@@ -101,7 +107,7 @@ type AdminHandler struct {
 }
 
 func NewAdminHandler(pool *accounts.Pool, cfg *config.Config) *AdminHandler {
-	return &AdminHandler{
+	handler := &AdminHandler{
 		pool: pool,
 		cfg:  cfg,
 		files: map[string]string{
@@ -113,6 +119,8 @@ func NewAdminHandler(pool *accounts.Pool, cfg *config.Config) *AdminHandler {
 		metadataPath: "account_metadata.json",
 		requestLogs:  NewRequestLogStore("request_logs.json", 500),
 	}
+	handler.applyScheduling(config.LoadScheduling())
+	return handler
 }
 
 func (h *AdminHandler) Page(c *gin.Context) {
@@ -475,6 +483,89 @@ func (h *AdminHandler) UpdateAPIKey(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"configured": true, "hint": maskCredential(req.APIKey)})
+}
+
+func (h *AdminHandler) GetScheduling(c *gin.Context) {
+	settings := config.LoadScheduling()
+	c.JSON(http.StatusOK, gin.H{
+		"mode":             h.pool.SchedulingMode(),
+		"preferred_source": settings.PreferredSource,
+		"preferred_id":     settings.PreferredID,
+	})
+}
+
+func (h *AdminHandler) UpdateScheduling(c *gin.Context) {
+	var req schedulingRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		respondError(c, http.StatusBadRequest, errors.New("request must be proper JSON"))
+		return
+	}
+	mode, ok := accounts.ParseSchedulingMode(strings.TrimSpace(req.Mode))
+	if !ok {
+		respondError(c, http.StatusBadRequest, errors.New("unsupported scheduling mode"))
+		return
+	}
+
+	settings := config.SchedulingSettings{Mode: string(mode)}
+	var preferred *accounts.Account
+	if mode == accounts.SchedulePreferred {
+		settings.PreferredSource = strings.ToLower(strings.TrimSpace(req.PreferredSource))
+		settings.PreferredID = strings.TrimSpace(req.PreferredID)
+		if settings.PreferredSource == "" || settings.PreferredID == "" {
+			respondError(c, http.StatusBadRequest, errors.New("select an account for preferred scheduling"))
+			return
+		}
+		var err error
+		preferred, err = h.managedAccount(settings.PreferredSource, settings.PreferredID)
+		if err != nil {
+			respondError(c, http.StatusBadRequest, err)
+			return
+		}
+		if preferred.Status != accounts.StatusActive {
+			respondError(c, http.StatusConflict, errors.New("preferred account must be enabled and active"))
+			return
+		}
+	}
+	if err := config.SaveScheduling(settings); err != nil {
+		respondError(c, http.StatusInternalServerError, fmt.Errorf("save scheduling settings: %w", err))
+		return
+	}
+	h.pool.SetScheduling(mode, preferred)
+	c.JSON(http.StatusOK, gin.H{
+		"mode":             mode,
+		"preferred_source": settings.PreferredSource,
+		"preferred_id":     settings.PreferredID,
+	})
+}
+
+func (h *AdminHandler) applyScheduling(settings config.SchedulingSettings) {
+	mode, ok := accounts.ParseSchedulingMode(settings.Mode)
+	if !ok {
+		mode = accounts.ScheduleRoundRobin
+	}
+	var preferred *accounts.Account
+	if mode == accounts.SchedulePreferred && settings.PreferredSource != "" && settings.PreferredID != "" {
+		preferred, _ = h.managedAccount(settings.PreferredSource, settings.PreferredID)
+	}
+	h.pool.SetScheduling(mode, preferred)
+}
+
+func (h *AdminHandler) managedAccount(source, id string) (*accounts.Account, error) {
+	path, ok := h.files[source]
+	if !ok || id == "" {
+		return nil, errors.New("invalid account reference")
+	}
+	accountFileMu.Lock()
+	defer accountFileMu.Unlock()
+	for _, entry := range accounts.LoadTokensFromFile(path) {
+		if managedAccountID(source, entry.Token) == id {
+			if account := h.pool.FindByCredential(entry.Token); account != nil {
+				return account, nil
+			}
+			return nil, errors.New("account is not loaded; restart the service and try again")
+		}
+	}
+	return nil, errors.New("account not found")
 }
 
 // normalizeManagedAccountRequest supports the management page's automatic

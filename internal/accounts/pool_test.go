@@ -50,6 +50,52 @@ func TestPoolAcquireRoundRobin(t *testing.T) {
 	_, _ = pool.Acquire(TypeNoAuth)
 }
 
+func TestPoolSchedulingModes(t *testing.T) {
+	makePool := func() (*Pool, *Account, *Account, *Account) {
+		pool := NewPool(nil)
+		a := NewAccount("a", TypeFree, "a")
+		b := NewAccount("b", TypeFree, "b")
+		c := NewAccount("c", TypeFree, "c")
+		for _, account := range []*Account{a, b, c} {
+			account.Status = StatusActive
+			pool.AddAccount(account)
+		}
+		return pool, a, b, c
+	}
+
+	t.Run("preferred falls back when unavailable", func(t *testing.T) {
+		pool, _, b, c := makePool()
+		pool.SetScheduling(SchedulePreferred, b)
+		if got, _ := pool.Acquire(TypeFree); got != b {
+			t.Fatalf("preferred = %v, want %v", got.ID, b.ID)
+		}
+		b.Status = StatusDisabled
+		if got, _ := pool.Acquire(TypeFree); got != c {
+			t.Fatalf("fallback = %v, want %v", got.ID, c.ID)
+		}
+	})
+
+	t.Run("least used", func(t *testing.T) {
+		pool, a, b, c := makePool()
+		a.TotalCalls, b.TotalCalls, c.TotalCalls = 8, 2, 5
+		pool.SetScheduling(ScheduleLeastUsed, nil)
+		if got, _ := pool.Acquire(TypeFree); got != b {
+			t.Fatalf("least used = %v, want %v", got.ID, b.ID)
+		}
+	})
+
+	t.Run("success rate", func(t *testing.T) {
+		pool, a, b, c := makePool()
+		a.TotalCalls, a.FailedCalls = 10, 3
+		b.TotalCalls, b.FailedCalls = 5, 0
+		c.TotalCalls, c.FailedCalls = 2, 1
+		pool.SetScheduling(ScheduleSuccessRate, nil)
+		if got, _ := pool.Acquire(TypeFree); got != b {
+			t.Fatalf("best success rate = %v, want %v", got.ID, b.ID)
+		}
+	})
+}
+
 func TestPoolAcquireNoAvailable(t *testing.T) {
 	pool := NewPool(nil)
 	_, err := pool.Acquire(TypePUID)

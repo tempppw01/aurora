@@ -76,6 +76,8 @@ func RegisterRouter(accountPool *accounts.Pool, cfg *config.Config) *gin.Engine 
 	adminGroup.POST("/accounts/:source/:id/status", adminHandler.UpdateAccountStatus)
 	adminGroup.GET("/settings/api-key", adminHandler.GetAPIKey)
 	adminGroup.PUT("/settings/api-key", adminHandler.UpdateAPIKey)
+	adminGroup.GET("/settings/scheduling", adminHandler.GetScheduling)
+	adminGroup.PUT("/settings/scheduling", adminHandler.UpdateScheduling)
 
 	return router
 }

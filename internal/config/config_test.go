@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -57,5 +58,33 @@ func TestGetBoolEnvInvalid(t *testing.T) {
 	result := getBoolEnv("TEST_BOOL", true)
 	if !result {
 		t.Error("getBoolEnv with invalid value should return default (true)")
+	}
+}
+
+func TestSchedulingSettingsPersistWithoutOverwritingAPIKey(t *testing.T) {
+	previousPath := adminSettingsFile
+	previousAuthorization, hadAuthorization := os.LookupEnv("Authorization")
+	adminSettingsFile = filepath.Join(t.TempDir(), "admin_settings.json")
+	defer func() {
+		adminSettingsFile = previousPath
+		if hadAuthorization {
+			_ = os.Setenv("Authorization", previousAuthorization)
+		} else {
+			_ = os.Unsetenv("Authorization")
+		}
+	}()
+
+	if err := SaveAuthorization("test-api-key"); err != nil {
+		t.Fatalf("SaveAuthorization: %v", err)
+	}
+	want := SchedulingSettings{Mode: "preferred", PreferredSource: "session", PreferredID: "account-id"}
+	if err := SaveScheduling(want); err != nil {
+		t.Fatalf("SaveScheduling: %v", err)
+	}
+	if got := LoadAuthorization(); got != "test-api-key" {
+		t.Fatalf("LoadAuthorization = %q, want preserved API key", got)
+	}
+	if got := LoadScheduling(); got != want {
+		t.Fatalf("LoadScheduling = %#v, want %#v", got, want)
 	}
 }
