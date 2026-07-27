@@ -196,12 +196,34 @@ func (h *AdminHandler) ListRequestLogs(c *gin.Context) {
 	if pageSize > 100 {
 		pageSize = 100
 	}
+	filter := requestLogFilter{
+		Result: strings.ToLower(strings.TrimSpace(c.Query("result"))),
+		Query:  strings.TrimSpace(c.Query("q")),
+	}
+	if filter.Result != "" && filter.Result != "success" && filter.Result != "failed" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "result must be success or failed"})
+		return
+	}
 	if h.requestLogs == nil {
 		c.JSON(http.StatusOK, gin.H{"data": []requestLogEntry{}, "summary": requestLogSummary{}, "pagination": requestLogPage{Page: 1, PageSize: pageSize}})
 		return
 	}
-	entries, summary, pagination := h.requestLogs.page(page, pageSize)
+	entries, summary, pagination := h.requestLogs.page(page, pageSize, filter)
 	c.JSON(http.StatusOK, gin.H{"data": entries, "summary": summary, "pagination": pagination})
+}
+
+// ClearRequestLogs removes the local request history. It is protected by the
+// same ADMIN_TOKEN middleware as all other administrative actions.
+func (h *AdminHandler) ClearRequestLogs(c *gin.Context) {
+	if h.requestLogs == nil {
+		c.Status(http.StatusNoContent)
+		return
+	}
+	if err := h.requestLogs.Clear(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to clear request logs"})
+		return
+	}
+	c.Status(http.StatusNoContent)
 }
 
 // requestAccountLabel finds the managed-account email without retaining the

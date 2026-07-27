@@ -153,6 +153,7 @@ func TestRequestLogsCaptureStatusAndAccountWithoutCredential(t *testing.T) {
 	router.GET("/v1/failure", h.RequestLogger, func(c *gin.Context) { c.Status(http.StatusBadGateway) })
 	admin := router.Group("/admin/api").Use(h.Authorize)
 	admin.GET("/request-logs", h.ListRequestLogs)
+	admin.DELETE("/request-logs", h.ClearRequestLogs)
 
 	for _, path := range []string{"/v1/success", "/v1/failure"} {
 		response := httptest.NewRecorder()
@@ -187,10 +188,51 @@ func TestRequestLogsCaptureStatusAndAccountWithoutCredential(t *testing.T) {
 		t.Fatalf("missing selected account in logs: %#v", result.Data)
 	}
 
+	request = httptest.NewRequest(http.MethodGet, "/admin/api/request-logs?result=failed&q=failure", nil)
+	request.Header.Set("Authorization", "Bearer admin-secret")
+	response = httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("filtered GET logs status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+		t.Fatalf("decode filtered request logs: %v", err)
+	}
+	if result.Summary.Total != 1 || result.Summary.Failed != 1 || len(result.Data) != 1 || result.Data[0].Success {
+		t.Fatalf("unexpected filtered logs: %#v", result)
+	}
+
+	request = httptest.NewRequest(http.MethodGet, "/admin/api/request-logs?result=success&q=%2Fv1%2Fsuccess", nil)
+	request.Header.Set("Authorization", "Bearer admin-secret")
+	response = httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("success-filtered GET logs status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+		t.Fatalf("decode success-filtered request logs: %v", err)
+	}
+	if result.Summary.Total != 1 || result.Summary.Success != 1 || len(result.Data) != 1 || !result.Data[0].Success {
+		t.Fatalf("unexpected success-filtered logs: %#v", result)
+	}
+
 	reloaded := NewRequestLogStore(filepath.Join(dir, "request_logs.json"), 2)
 	entries, _ := reloaded.recent(10)
 	if len(entries) != 2 {
 		t.Fatalf("persistent request logs = %d, want 2", len(entries))
+	}
+
+	request = httptest.NewRequest(http.MethodDelete, "/admin/api/request-logs", nil)
+	request.Header.Set("Authorization", "Bearer admin-secret")
+	response = httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("DELETE logs status = %d, body = %s", response.Code, response.Body.String())
+	}
+	reloaded = NewRequestLogStore(filepath.Join(dir, "request_logs.json"), 2)
+	entries, _ = reloaded.recent(10)
+	if len(entries) != 0 {
+		t.Fatalf("cleared persistent request logs = %d, want 0", len(entries))
 	}
 }
 
