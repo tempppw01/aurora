@@ -45,7 +45,7 @@ chmod +x ./aurora
 ### Docker 部署
 
 ```bash
-docker volume create aurora-data
+mkdir -p data
 
 docker run -d \
   --name aurora \
@@ -53,23 +53,22 @@ docker run -d \
   -p 18188:8080 \
   -e Authorization='替换为你的 OpenAI 兼容 API 密钥' \
   -e ADMIN_TOKEN='替换为你的管理台密钥' \
-  -v aurora-data:/data \
+  -v "$(pwd)/data:/data" \
   34v0wphix/aurora:latest
 ```
 
-启动后访问 `http://服务器 IP:18188/admin`，使用 `ADMIN_TOKEN` 登录管理台并导入账号。`18188` 是宿主机对外端口，容器内部仍使用 `8080`。`aurora-data` 卷会保存账号池、管理台设置与请求日志；删除或重建容器不会丢失这些数据。
+启动后访问 `http://服务器 IP:18188/admin`，使用 `ADMIN_TOKEN` 登录管理台并导入账号。`18188` 是宿主机对外端口，容器内部仍使用 `8080`。当前目录的 `data` 会保存账号池、管理台设置与请求日志；删除或重建容器不会丢失这些数据。
 
 ### Docker Compose 部署
 
-仓库根目录提供可直接使用的 [docker-compose.yml](docker-compose.yml)。它使用已发布的多架构镜像（`linux/amd64`、`linux/arm64`），并把所有运行时数据持久化到 Docker volume。
+仓库根目录提供可直接使用的 [docker-compose.yml](docker-compose.yml)。它使用已发布的多架构镜像（`linux/amd64`、`linux/arm64`），将所有配置直接写在 `environment` 中，并将运行时数据持久化到当前目录的 `data`。
 
 ```bash
 git clone https://github.com/tempppw01/aurora.git
 cd aurora
 
-# 生成两条随机密钥，并写入 .env（不要提交此文件）
-printf 'AURORA_API_KEY=%s\nAURORA_ADMIN_TOKEN=%s\n' \
-  "$(openssl rand -hex 32)" "$(openssl rand -hex 32)" > .env
+# 打开 docker-compose.yml，将 Authorization 和 ADMIN_TOKEN 改为两条随机密钥。
+# 其余环境变量已附中文说明；不需要的可保留默认值。
 
 docker compose pull
 docker compose up -d
@@ -77,11 +76,11 @@ docker compose up -d
 
 部署完成后：
 
-- 管理台：`http://服务器 IP:18188/admin`，填写 `AURORA_ADMIN_TOKEN`。
-- OpenAI 兼容地址：`http://服务器 IP:18188/v1`，请求头使用 `Authorization: Bearer AURORA_API_KEY`。
+- 管理台：`http://服务器 IP:18188/admin`，填写 Compose 中的 `ADMIN_TOKEN`。
+- OpenAI 兼容地址：`http://服务器 IP:18188/v1`，请求头使用 `Authorization: Bearer` 加 Compose 中的 `Authorization` 值。
 - 查看日志：`docker compose logs -f aurora`；升级镜像：`docker compose pull && docker compose up -d`。
 
-如需将数据放到宿主机目录，可把 Compose 中的 `aurora-data:/data` 改成 `./data:/data`；确保该目录仅由受信任用户读取。首次部署后请从管理台导入账号，不需要手动挂载 token 文本文件。
+Compose 已使用 `./data:/data`，因此不需要再写底部的 `volumes: aurora-data:` 声明；直接备份项目目录里的 `data` 即可。确保该目录仅由受信任用户读取。首次部署后请从管理台导入账号，不需要手动挂载 token 文本文件。
 
 ## 配置
 
