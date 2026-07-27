@@ -45,25 +45,43 @@ chmod +x ./aurora
 ### Docker 部署
 
 ```bash
+docker volume create aurora-data
+
 docker run -d \
   --name aurora \
+  --restart unless-stopped \
   -p 8080:8080 \
-  -v $(pwd)/access_tokens.txt:/access_tokens.txt:ro \
-  ghcr.io/aurora-develop/aurora:latest
+  -e Authorization='替换为你的 OpenAI 兼容 API 密钥' \
+  -e ADMIN_TOKEN='替换为你的管理台密钥' \
+  -v aurora-data:/data \
+  34v0wphix/aurora:latest
 ```
 
-> 准备 `access_tokens.txt` 到当前目录（一行一个 access_token），通过 `-v` 挂载进容器。其他文件同理：`-v $(pwd)/free_tokens.txt:/free_tokens.txt:ro`、`-v $(pwd)/proxies.txt:/proxies.txt:ro`。
+启动后访问 `http://服务器 IP:8080/admin`，使用 `ADMIN_TOKEN` 登录管理台并导入账号。`aurora-data` 卷会保存账号池、管理台设置与请求日志；删除或重建容器不会丢失这些数据。
 
 ### Docker Compose 部署
 
+仓库根目录提供可直接使用的 [docker-compose.yml](docker-compose.yml)。它使用已发布的多架构镜像（`linux/amd64`、`linux/arm64`），并把所有运行时数据持久化到 Docker volume。
+
 ```bash
-mkdir aurora
+git clone https://github.com/tempppw01/aurora.git
 cd aurora
-# 1. 准备好 access_tokens.txt（每行一个 token）
-# 2. 将仓库中的 docker-compose.yml 放到当前目录
-# 3. docker-compose.yml 已包含 ./access_tokens.txt 的挂载，按需取消注释 free_tokens.txt 或 proxies.txt
-docker-compose up -d
+
+# 生成两条随机密钥，并写入 .env（不要提交此文件）
+printf 'AURORA_API_KEY=%s\nAURORA_ADMIN_TOKEN=%s\n' \
+  "$(openssl rand -hex 32)" "$(openssl rand -hex 32)" > .env
+
+docker compose pull
+docker compose up -d
 ```
+
+部署完成后：
+
+- 管理台：`http://服务器 IP:8080/admin`，填写 `AURORA_ADMIN_TOKEN`。
+- OpenAI 兼容地址：`http://服务器 IP:8080/v1`，请求头使用 `Authorization: Bearer AURORA_API_KEY`。
+- 查看日志：`docker compose logs -f aurora`；升级镜像：`docker compose pull && docker compose up -d`。
+
+如需将数据放到宿主机目录，可把 Compose 中的 `aurora-data:/data` 改成 `./data:/data`；确保该目录仅由受信任用户读取。首次部署后请从管理台导入账号，不需要手动挂载 token 文本文件。
 
 ## 配置
 
