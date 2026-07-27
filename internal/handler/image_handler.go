@@ -3,12 +3,14 @@ package handler
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"aurora/httpclient"
 	"aurora/httpclient/bogdanfinn"
@@ -26,8 +28,18 @@ type ImageHandler struct {
 	cfg         *config.Config
 }
 
+const imageUpstreamRequestTimeoutSeconds = 90
+
 func NewImageHandler(pool *accounts.Pool, cfg *config.Config) *ImageHandler {
 	return &ImageHandler{accountPool: pool, cfg: cfg}
+}
+
+func setupImageClientWithProxy(proxyURL string) *bogdanfinn.TlsClient {
+	client := bogdanfinn.NewStdClientWithTimeout(imageUpstreamRequestTimeoutSeconds)
+	if proxyURL != "" {
+		_ = client.SetProxy(proxyURL)
+	}
+	return client
 }
 
 // ─── Image stream types ──────────────────────────────────────────
@@ -97,6 +109,37 @@ func writeImageStreamDone(c *gin.Context) bool {
 	}
 	c.Writer.Flush()
 	return true
+}
+
+func imageGenerationProgress(c *gin.Context, index, total int, model string) func(int, time.Duration) {
+	return func(attempt int, elapsed time.Duration) {
+		// A heartbeat every ten seconds keeps SSE clients and reverse proxies
+		// informed without flooding the stream during a normal image render.
+		if attempt == 0 || attempt%5 != 0 {
+			return
+		}
+		writeImageStreamEvent(c, "image.generation.progress", imageStreamChunk{
+			Object:       "image.generation.progress",
+			Index:        index,
+			Total:        total,
+			Model:        model,
+			ProgressText: fmt.Sprintf("Image generation is still running (%ds)", int(elapsed.Seconds())),
+		})
+	}
+}
+
+func (h *ImageHandler) recordImageGenerationFailure(c *gin.Context, account *accounts.Account, err error) {
+	if errors.Is(err, chatgpt.ErrImageGenerationTimeout) {
+		rememberRequestFailure(c, "image_generation_timeout")
+		return
+	}
+	message := strings.ToLower(err.Error())
+	if strings.Contains(message, "unauthorized") || strings.Contains(message, " 401") || strings.Contains(message, "status 401") {
+		h.accountPool.ReportFailure(account)
+		rememberRequestFailure(c, "image_account_auth_failed")
+		return
+	}
+	rememberRequestFailure(c, "image_generation_failed")
 }
 
 // requestStreamFlag 解析 stream 参数,支持 JSON body 的 stream 字段或 ?stream=true 查询参数。
@@ -224,7 +267,7 @@ func (h *ImageHandler) Generations(c *gin.Context) {
 	}
 
 	proxyUrl := account.Proxy
-	client := setupClientWithProxy(proxyUrl)
+	client := setupImageClientWithProxy(proxyUrl)
 	client.SetCookies("https://chatgpt.com", chatgpt.BasicCookies)
 	turnStile, status, err := chatgpt.InitSentinel(client, account, proxyUrl, 0)
 	if err != nil {
@@ -257,8 +300,13 @@ func (h *ImageHandler) Generations(c *gin.Context) {
 				ProgressText: fmt.Sprintf("Generating image %d/%d ...", i+1, imageRequest.N),
 			})
 		}
-		imageResults, upstreamText, err := chatgpt.GeneratePictureConversationImages(client, account, turnStile, upstreamPrompt, imageRequest.Model, proxyUrl)
+		var progress func(int, time.Duration)
+		if stream {
+			progress = imageGenerationProgress(c, i, imageRequest.N, imageRequest.Model)
+		}
+		imageResults, upstreamText, err := chatgpt.GeneratePictureConversationImagesWithProgress(client, account, turnStile, upstreamPrompt, imageRequest.Model, proxyUrl, progress)
 		if err != nil {
+			h.recordImageGenerationFailure(c, account, err)
 			if stream {
 				writeImageStreamEvent(c, "image.generation.error", gin.H{
 					"object":  "image.generation.error",
@@ -329,6 +377,7 @@ func (h *ImageHandler) Generations(c *gin.Context) {
 			}
 		}
 		if len(imageResults) == 0 && upstreamText != "" {
+			rememberRequestFailure(c, "image_generation_empty_result")
 			if stream {
 				writeImageStreamEvent(c, "image.generation.error", gin.H{
 					"object":  "image.generation.error",
@@ -352,6 +401,7 @@ func (h *ImageHandler) Generations(c *gin.Context) {
 		}
 	}
 	if len(data) == 0 {
+		rememberRequestFailure(c, "image_generation_empty_result")
 		if stream {
 			writeImageStreamEvent(c, "image.generation.error", gin.H{
 				"object":  "image.generation.error",
@@ -874,7 +924,7 @@ func (h *ImageHandler) runImageEditFlow(c *gin.Context, asVariation bool) {
 	}
 
 	proxyUrl := account.Proxy
-	client := setupClientWithProxy(proxyUrl)
+	client := setupImageClientWithProxy(proxyUrl)
 	client.SetCookies("https://chatgpt.com", chatgpt.BasicCookies)
 	turnStile, status, err := chatgpt.InitSentinel(client, account, proxyUrl, 0)
 	if err != nil {
@@ -939,8 +989,13 @@ func (h *ImageHandler) runImageEditFlow(c *gin.Context, asVariation bool) {
 				ProgressText: fmt.Sprintf("Generating image %d/%d ...", i+1, n),
 			})
 		}
-		imageResults, upstreamText, err := chatgpt.GeneratePictureConversationImagesWithReferences(client, account, turnStile, upstreamPrompt, model, proxyUrl, references)
+		var progress func(int, time.Duration)
+		if stream {
+			progress = imageGenerationProgress(c, i, n, model)
+		}
+		imageResults, upstreamText, err := chatgpt.GeneratePictureConversationImagesWithReferencesProgress(client, account, turnStile, upstreamPrompt, model, proxyUrl, references, progress)
 		if err != nil {
+			h.recordImageGenerationFailure(c, account, err)
 			if stream {
 				writeImageStreamEvent(c, "image.generation.error", gin.H{
 					"object":  "image.generation.error",
@@ -1011,6 +1066,7 @@ func (h *ImageHandler) runImageEditFlow(c *gin.Context, asVariation bool) {
 			}
 		}
 		if len(imageResults) == 0 && upstreamText != "" {
+			rememberRequestFailure(c, "image_generation_empty_result")
 			if stream {
 				writeImageStreamEvent(c, "image.generation.error", gin.H{
 					"object":  "image.generation.error",
@@ -1034,6 +1090,7 @@ func (h *ImageHandler) runImageEditFlow(c *gin.Context, asVariation bool) {
 		}
 	}
 	if len(data) == 0 {
+		rememberRequestFailure(c, "image_generation_empty_result")
 		if stream {
 			writeImageStreamEvent(c, "image.generation.error", gin.H{
 				"object":  "image.generation.error",

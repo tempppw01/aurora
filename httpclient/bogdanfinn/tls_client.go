@@ -19,9 +19,19 @@ type TlsClient struct {
 type handler func(r *fhttp.Request) error
 
 func NewStdClient() *TlsClient {
+	return NewStdClientWithTimeout(600)
+}
+
+// NewStdClientWithTimeout creates an isolated browser-profiled client with a
+// bounded request timeout. Long-running image jobs use this so a stalled
+// upstream request cannot consume a worker indefinitely.
+func NewStdClientWithTimeout(timeoutSeconds int) *TlsClient {
+	if timeoutSeconds <= 0 {
+		timeoutSeconds = 600
+	}
 	client, _ := tls_client.NewHttpClient(tls_client.NewNoopLogger(), []tls_client.HttpClientOption{
 		tls_client.WithCookieJar(tls_client.NewCookieJar()),
-		tls_client.WithTimeoutSeconds(600),
+		tls_client.WithTimeoutSeconds(timeoutSeconds),
 		tls_client.WithClientProfile(profiles.Chrome_146),
 	}...)
 

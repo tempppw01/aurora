@@ -159,7 +159,7 @@ func TestRequestLogsCaptureStatusAndAccountWithoutCredential(t *testing.T) {
 		router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
 	}
 
-	request := httptest.NewRequest(http.MethodGet, "/admin/api/request-logs", nil)
+	request := httptest.NewRequest(http.MethodGet, "/admin/api/request-logs?page=2&page_size=1", nil)
 	request.Header.Set("Authorization", "Bearer admin-secret")
 	response := httptest.NewRecorder()
 	router.ServeHTTP(response, request)
@@ -170,8 +170,9 @@ func TestRequestLogsCaptureStatusAndAccountWithoutCredential(t *testing.T) {
 		t.Fatal("request log API leaked an account credential")
 	}
 	var result struct {
-		Data    []requestLogEntry `json:"data"`
-		Summary requestLogSummary `json:"summary"`
+		Data       []requestLogEntry `json:"data"`
+		Summary    requestLogSummary `json:"summary"`
+		Pagination requestLogPage    `json:"pagination"`
 	}
 	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
 		t.Fatalf("decode request logs: %v", err)
@@ -179,7 +180,10 @@ func TestRequestLogsCaptureStatusAndAccountWithoutCredential(t *testing.T) {
 	if result.Summary.Total != 2 || result.Summary.Success != 1 || result.Summary.Failed != 1 || result.Summary.SuccessRate != 50 {
 		t.Fatalf("unexpected summary: %#v", result.Summary)
 	}
-	if len(result.Data) != 2 || result.Data[1].AccountType != "free" || result.Data[1].Account == "" {
+	if result.Pagination.Page != 2 || result.Pagination.PageSize != 1 || result.Pagination.TotalPages != 2 {
+		t.Fatalf("unexpected pagination: %#v", result.Pagination)
+	}
+	if len(result.Data) != 1 || result.Data[0].AccountType != "free" || result.Data[0].Account == "" {
 		t.Fatalf("missing selected account in logs: %#v", result.Data)
 	}
 

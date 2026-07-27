@@ -181,21 +181,27 @@ func (h *AdminHandler) ListAccounts(c *gin.Context) {
 // ListRequestLogs returns the most recent API requests and a success summary.
 // It deliberately never exposes request/response content or credentials.
 func (h *AdminHandler) ListRequestLogs(c *gin.Context) {
-	limit := 100
-	if raw := strings.TrimSpace(c.Query("limit")); raw != "" {
+	page := 1
+	if raw := strings.TrimSpace(c.Query("page")); raw != "" {
 		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
-			limit = parsed
+			page = parsed
 		}
 	}
-	if limit > 500 {
-		limit = 500
+	pageSize := 25
+	if raw := strings.TrimSpace(c.Query("page_size")); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
+			pageSize = parsed
+		}
+	}
+	if pageSize > 100 {
+		pageSize = 100
 	}
 	if h.requestLogs == nil {
-		c.JSON(http.StatusOK, gin.H{"data": []requestLogEntry{}, "summary": requestLogSummary{}})
+		c.JSON(http.StatusOK, gin.H{"data": []requestLogEntry{}, "summary": requestLogSummary{}, "pagination": requestLogPage{Page: 1, PageSize: pageSize}})
 		return
 	}
-	entries, summary := h.requestLogs.recent(limit)
-	c.JSON(http.StatusOK, gin.H{"data": entries, "summary": summary})
+	entries, summary, pagination := h.requestLogs.page(page, pageSize)
+	c.JSON(http.StatusOK, gin.H{"data": entries, "summary": summary, "pagination": pagination})
 }
 
 // requestAccountLabel finds the managed-account email without retaining the

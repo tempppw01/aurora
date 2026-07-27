@@ -25,6 +25,13 @@ type ImageGenerationResult struct {
 	B64JSON string
 }
 
+var ErrImageGenerationTimeout = errors.New("image generation timed out while waiting for ChatGPT")
+
+const (
+	imagePollAttempts = 45
+	imagePollInterval = 2 * time.Second
+)
+
 // ImageEditReference 表示已上传到 ChatGPT 文件服务的一张源图。
 type ImageEditReference struct {
 	FileID   string
@@ -302,7 +309,7 @@ func getConversation(client httpclient.AuroraHttpClient, account *accounts.Accou
 		return nil, err
 	}
 	if response.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("get conversation failed: %s", string(body))
+		return nil, fmt.Errorf("get conversation failed (status %d): %s", response.StatusCode, string(body))
 	}
 	var result map[string]interface{}
 	if err := json.Unmarshal(body, &result); err != nil {
@@ -353,13 +360,24 @@ func findImageGenerationError(value interface{}) string {
 
 // PollImageResults 轮询对话直到图片生成完成。
 func PollImageResults(client httpclient.AuroraHttpClient, account *accounts.Account, conversationID string, initial []ImageGenerationResult) ([]ImageGenerationResult, error) {
+	return PollImageResultsWithProgress(client, account, conversationID, initial, nil)
+}
+
+// PollImageResultsWithProgress waits for asynchronous image generation while
+// optionally reporting progress to streaming callers. A bounded wait gives
+// callers a useful error instead of an indefinitely stalled request.
+func PollImageResultsWithProgress(client httpclient.AuroraHttpClient, account *accounts.Account, conversationID string, initial []ImageGenerationResult, progress func(int, time.Duration)) ([]ImageGenerationResult, error) {
 	if len(initial) > 0 || conversationID == "" {
 		return initial, nil
 	}
+	started := time.Now()
 	var lastErr error
-	for i := 0; i < 45; i++ {
+	for i := 0; i < imagePollAttempts; i++ {
 		if i > 0 {
-			time.Sleep(2 * time.Second)
+			time.Sleep(imagePollInterval)
+			if progress != nil {
+				progress(i, time.Since(started))
+			}
 		}
 		conversation, err := getConversation(client, account, conversationID)
 		if err != nil {
@@ -375,9 +393,9 @@ func PollImageResults(client httpclient.AuroraHttpClient, account *accounts.Acco
 		}
 	}
 	if lastErr != nil {
-		return nil, lastErr
+		return nil, fmt.Errorf("%w: last poll error: %v", ErrImageGenerationTimeout, lastErr)
 	}
-	return nil, nil
+	return nil, ErrImageGenerationTimeout
 }
 
 func imageModelSlug(model string) string {
@@ -428,7 +446,7 @@ func prepareImageConversation(client httpclient.AuroraHttpClient, account *accou
 		return "", err
 	}
 	if response.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("prepare image conversation failed: %s", string(body))
+		return "", fmt.Errorf("prepare image conversation failed (status %d): %s", response.StatusCode, string(body))
 	}
 	var result struct {
 		ConduitToken string `json:"conduit_token"`
@@ -444,6 +462,14 @@ func prepareImageConversation(client httpclient.AuroraHttpClient, account *accou
 
 // GeneratePictureConversationImages 通过图片对话 API 生成图片。
 func GeneratePictureConversationImages(client httpclient.AuroraHttpClient, account *accounts.Account, turnStile *TurnStile, prompt, model, proxy string) ([]ImageGenerationResult, string, error) {
+	return generatePictureConversationImages(client, account, turnStile, prompt, model, proxy, nil)
+}
+
+func GeneratePictureConversationImagesWithProgress(client httpclient.AuroraHttpClient, account *accounts.Account, turnStile *TurnStile, prompt, model, proxy string, progress func(int, time.Duration)) ([]ImageGenerationResult, string, error) {
+	return generatePictureConversationImages(client, account, turnStile, prompt, model, proxy, progress)
+}
+
+func generatePictureConversationImages(client httpclient.AuroraHttpClient, account *accounts.Account, turnStile *TurnStile, prompt, model, proxy string, progress func(int, time.Duration)) ([]ImageGenerationResult, string, error) {
 	if proxy != "" {
 		client.SetProxy(proxy)
 	}
@@ -496,13 +522,13 @@ func GeneratePictureConversationImages(client httpclient.AuroraHttpClient, accou
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(response.Body)
-		return nil, "", fmt.Errorf("image conversation failed: %s", string(body))
+		return nil, "", fmt.Errorf("image conversation failed (status %d): %s", response.StatusCode, string(body))
 	}
 	results, conversationID, upstreamText, err := CollectImageResults(response, client, account)
 	if err != nil {
 		return results, upstreamText, err
 	}
-	results, err = PollImageResults(client, account, conversationID, results)
+	results, err = PollImageResultsWithProgress(client, account, conversationID, results, progress)
 	if err != nil {
 		return results, upstreamText, err
 	}
@@ -511,6 +537,14 @@ func GeneratePictureConversationImages(client httpclient.AuroraHttpClient, accou
 
 // GeneratePictureConversationImagesWithReferences 携带源图引用生成图片（用于 edits/variations）。
 func GeneratePictureConversationImagesWithReferences(client httpclient.AuroraHttpClient, account *accounts.Account, turnStile *TurnStile, prompt, model, proxy string, references []ImageEditReference) ([]ImageGenerationResult, string, error) {
+	return generatePictureConversationImagesWithReferences(client, account, turnStile, prompt, model, proxy, references, nil)
+}
+
+func GeneratePictureConversationImagesWithReferencesProgress(client httpclient.AuroraHttpClient, account *accounts.Account, turnStile *TurnStile, prompt, model, proxy string, references []ImageEditReference, progress func(int, time.Duration)) ([]ImageGenerationResult, string, error) {
+	return generatePictureConversationImagesWithReferences(client, account, turnStile, prompt, model, proxy, references, progress)
+}
+
+func generatePictureConversationImagesWithReferences(client httpclient.AuroraHttpClient, account *accounts.Account, turnStile *TurnStile, prompt, model, proxy string, references []ImageEditReference, progress func(int, time.Duration)) ([]ImageGenerationResult, string, error) {
 	if proxy != "" {
 		client.SetProxy(proxy)
 	}
@@ -618,13 +652,13 @@ func GeneratePictureConversationImagesWithReferences(client httpclient.AuroraHtt
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(response.Body)
-		return nil, "", fmt.Errorf("image conversation failed: %s", string(body))
+		return nil, "", fmt.Errorf("image conversation failed (status %d): %s", response.StatusCode, string(body))
 	}
 	results, conversationID, upstreamText, err := CollectImageResults(response, client, account)
 	if err != nil {
 		return results, upstreamText, err
 	}
-	results, err = PollImageResults(client, account, conversationID, results)
+	results, err = PollImageResultsWithProgress(client, account, conversationID, results, progress)
 	if err != nil {
 		return results, upstreamText, err
 	}

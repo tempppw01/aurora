@@ -15,6 +15,7 @@ import (
 )
 
 const requestLogAccountKey = "aurora.request_log.account"
+const requestLogFailureKey = "aurora.request_log.failure"
 
 // requestLogEntry intentionally contains operational metadata only. Request
 // bodies, response bodies, Authorization headers, and credentials must never
@@ -29,6 +30,7 @@ type requestLogEntry struct {
 	DurationMS  int64  `json:"duration_ms"`
 	Account     string `json:"account,omitempty"`
 	AccountType string `json:"account_type,omitempty"`
+	ErrorCode   string `json:"error_code,omitempty"`
 }
 
 type requestLogSummary struct {
@@ -36,6 +38,12 @@ type requestLogSummary struct {
 	Success     int     `json:"success"`
 	Failed      int     `json:"failed"`
 	SuccessRate float64 `json:"success_rate"`
+}
+
+type requestLogPage struct {
+	Page       int `json:"page"`
+	PageSize   int `json:"page_size"`
+	TotalPages int `json:"total_pages"`
 }
 
 // RequestLogStore keeps a bounded, persistent recent-request history.
@@ -138,11 +146,43 @@ func (s *RequestLogStore) recent(limit int) ([]requestLogEntry, requestLogSummar
 	return entries, summary
 }
 
+func (s *RequestLogStore) page(page, pageSize int) ([]requestLogEntry, requestLogSummary, requestLogPage) {
+	if pageSize <= 0 {
+		pageSize = 25
+	}
+	if page <= 0 {
+		page = 1
+	}
+	entries, summary := s.recent(0)
+	paging := requestLogPage{PageSize: pageSize}
+	if summary.Total == 0 {
+		paging.Page = 1
+		return entries, summary, paging
+	}
+	paging.TotalPages = (summary.Total + pageSize - 1) / pageSize
+	if page > paging.TotalPages {
+		page = paging.TotalPages
+	}
+	paging.Page = page
+	start := (page - 1) * pageSize
+	end := start + pageSize
+	if end > len(entries) {
+		end = len(entries)
+	}
+	return entries[start:end], summary, paging
+}
+
 func rememberRequestAccount(c *gin.Context, account *accounts.Account) *accounts.Account {
 	if account != nil {
 		c.Set(requestLogAccountKey, account)
 	}
 	return account
+}
+
+func rememberRequestFailure(c *gin.Context, code string) {
+	if code != "" {
+		c.Set(requestLogFailureKey, code)
+	}
 }
 
 // RequestLogger records only API requests that callers make to Aurora. It is
@@ -166,6 +206,12 @@ func (h *AdminHandler) RequestLogger(c *gin.Context) {
 		StatusCode: status,
 		Success:    status >= 200 && status < 300,
 		DurationMS: time.Since(started).Milliseconds(),
+	}
+	if value, ok := c.Get(requestLogFailureKey); ok {
+		if code, ok := value.(string); ok && code != "" {
+			entry.Success = false
+			entry.ErrorCode = code
+		}
 	}
 	if value, ok := c.Get(requestLogAccountKey); ok {
 		if account, ok := value.(*accounts.Account); ok && account != nil {
