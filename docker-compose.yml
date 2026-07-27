@@ -9,56 +9,11 @@ services:
       # 左侧是宿主机对外端口，避免使用常见的 8080；右侧为容器内部服务端口。
       - "18188:8080"
     environment:
-      # ── 服务监听 ──
-      # 容器内监听全部网卡及 8080 端口；无需改为宿主机端口。
-      SERVER_HOST: 0.0.0.0
-      SERVER_PORT: "8080"
-      # PORT 仅在未设置 SERVER_PORT 时生效；此处保留为空即可。
-      PORT: ""
-
-      # ── 鉴权（必须改成自己的随机密钥后再启动）──
+      # 必须改成自己的随机密钥后再启动。
       # OpenAI 兼容接口的访问密钥，客户端请求头为 Authorization: Bearer 此值。
       Authorization: "请替换为一条足够长的随机 API 密钥"
       # /admin 管理台密钥；建议与上面的 API 密钥不同。
       ADMIN_TOKEN: "请替换为另一条足够长的随机管理台密钥"
-
-      # ── 上游与代理（按需填写）──
-      # ChatGPT 上游地址；通常无需修改。
-      BASE_URL: "https://chatgpt.com/backend-api"
-      # 为 /backend-api/* 和 /v1/files 单独指定转发代理；不需要时保持为空。
-      API_REVERSE_PROXY: ""
-      FILES_REVERSE_PROXY: ""
-      # 账号池代理和备用 HTTP 代理；示例：http://user:password@host:port
-      PROXY_URL: ""
-      http_proxy: ""
-
-      # ── 对话与工具 ──
-      # 保持 OpenAI 兼容接口的流式输出；需要保留多轮历史时可改为 "true"。
-      STREAM_MODE: "true"
-      ENABLE_HISTORY: "false"
-      # 单次回复被截断时最多自动续写次数；0 表示关闭自动续写。
-      MAX_CONTINUE_COUNT: "3"
-      # 是否接受调用方在请求头中提供的外部 ChatGPT access_token。
-      ENABLE_EXTERNAL_TOKEN: "true"
-      # 是否启用 Tool Calling 文本协议模拟。
-      TOOL_CALLING_ENABLED: "true"
-      # 模型因 sandbox 拒绝时的最大重试次数。
-      REFUSAL_RETRIES: "3"
-      # 工具调用调试日志路径；不需要时保持为空，避免记录额外数据。
-      DEBUG_TOOL_LOG: ""
-      # 是否输出 Sentinel 调试信息到容器日志。
-      DEBUG_SENTINEL: "false"
-
-      # ── 免费账号池（按需启用）──
-      # 自动生成免费 UUID 账号；通常使用管理台导入账号时保持 false。
-      FREE_ACCOUNTS: "false"
-      # 开启 FREE_ACCOUNTS 后生成的账号数量。
-      FREE_ACCOUNTS_NUM: "1024"
-
-      # ── HTTPS（通常交给 Nginx、Caddy 或面板反代处理）──
-      # 容器内直启 HTTPS 时填写容器内证书路径；不需要时保持为空。
-      TLS_CERT: ""
-      TLS_KEY: ""
     volumes:
       # 账号池、管理台设置和请求日志都保存到当前目录 data，重建容器也不会丢失。
       # 直接备份此目录即可；请限制宿主机目录的读取权限。

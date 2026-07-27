@@ -61,14 +61,14 @@ docker run -d \
 
 ### Docker Compose 部署
 
-仓库根目录提供可直接使用的 [docker-compose.yml](docker-compose.yml)。它使用已发布的多架构镜像（`linux/amd64`、`linux/arm64`），将所有配置直接写在 `environment` 中，并将运行时数据持久化到当前目录的 `data`。
+仓库根目录提供可直接使用的 [docker-compose.yml](docker-compose.yml)。它使用已发布的多架构镜像（`linux/amd64`、`linux/arm64`），只保留必填的两项密钥配置，并将运行时数据持久化到当前目录的 `data`。
 
 ```bash
 git clone https://github.com/tempppw01/aurora.git
 cd aurora
 
 # 打开 docker-compose.yml，将 Authorization 和 ADMIN_TOKEN 改为两条随机密钥。
-# 其余环境变量已附中文说明；不需要的可保留默认值。
+# 其他配置使用默认值；需要代理、历史对话等高级设置时，再参考下方“配置”章节添加。
 
 docker compose pull
 docker compose up -d
