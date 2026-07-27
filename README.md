@@ -50,14 +50,14 @@ docker volume create aurora-data
 docker run -d \
   --name aurora \
   --restart unless-stopped \
-  -p 8080:8080 \
+  -p 18188:8080 \
   -e Authorization='替换为你的 OpenAI 兼容 API 密钥' \
   -e ADMIN_TOKEN='替换为你的管理台密钥' \
   -v aurora-data:/data \
   34v0wphix/aurora:latest
 ```
 
-启动后访问 `http://服务器 IP:8080/admin`，使用 `ADMIN_TOKEN` 登录管理台并导入账号。`aurora-data` 卷会保存账号池、管理台设置与请求日志；删除或重建容器不会丢失这些数据。
+启动后访问 `http://服务器 IP:18188/admin`，使用 `ADMIN_TOKEN` 登录管理台并导入账号。`18188` 是宿主机对外端口，容器内部仍使用 `8080`。`aurora-data` 卷会保存账号池、管理台设置与请求日志；删除或重建容器不会丢失这些数据。
 
 ### Docker Compose 部署
 
@@ -77,8 +77,8 @@ docker compose up -d
 
 部署完成后：
 
-- 管理台：`http://服务器 IP:8080/admin`，填写 `AURORA_ADMIN_TOKEN`。
-- OpenAI 兼容地址：`http://服务器 IP:8080/v1`，请求头使用 `Authorization: Bearer AURORA_API_KEY`。
+- 管理台：`http://服务器 IP:18188/admin`，填写 `AURORA_ADMIN_TOKEN`。
+- OpenAI 兼容地址：`http://服务器 IP:18188/v1`，请求头使用 `Authorization: Bearer AURORA_API_KEY`。
 - 查看日志：`docker compose logs -f aurora`；升级镜像：`docker compose pull && docker compose up -d`。
 
 如需将数据放到宿主机目录，可把 Compose 中的 `aurora-data:/data` 改成 `./data:/data`；确保该目录仅由受信任用户读取。首次部署后请从管理台导入账号，不需要手动挂载 token 文本文件。

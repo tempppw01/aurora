@@ -1,21 +1,27 @@
 services:
   aurora:
+    # Docker Hub 多架构镜像：同时支持 x86_64 和 ARM64（NAS）。
     image: 34v0wphix/aurora:latest
     container_name: aurora
+    # 容器异常退出或主机重启后自动恢复。
     restart: unless-stopped
     ports:
-      - "8080:8080"
+      # 左侧是宿主机对外端口，避免使用常见的 8080；右侧为容器内部服务端口。
+      - "18188:8080"
     environment:
+      # 服务在容器内监听全部网卡及 8080 端口；无需改为宿主机端口。
       SERVER_HOST: 0.0.0.0
       SERVER_PORT: 8080
-      # Set both variables in .env before starting the service.
-      Authorization: ${AURORA_API_KEY:?Set AURORA_API_KEY in .env}
-      ADMIN_TOKEN: ${AURORA_ADMIN_TOKEN:?Set AURORA_ADMIN_TOKEN in .env}
+      # 启动前必须在同目录 .env 设置这两条密钥，请勿直接写入本文件或提交到 Git。
+      Authorization: ${AURORA_API_KEY:?请先在 .env 设置 AURORA_API_KEY}
+      ADMIN_TOKEN: ${AURORA_ADMIN_TOKEN:?请先在 .env 设置 AURORA_ADMIN_TOKEN}
+      # 保持 OpenAI 兼容接口的流式输出；需要保留多轮历史时可改为 "true"。
       STREAM_MODE: "true"
       ENABLE_HISTORY: "false"
     volumes:
-      # Account pool, admin settings, and request logs are all persisted here.
+      # 账号池、管理台设置和请求日志都保存到命名卷，重建容器也不会丢失。
       - aurora-data:/data
 
 volumes:
+  # Docker 自动管理的持久化数据卷；需要备份时可改为 ./data:/data。
   aurora-data:
