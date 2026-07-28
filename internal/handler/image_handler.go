@@ -1,13 +1,18 @@
 package handler
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
+	_ "image/jpeg"
+	"image/png"
 	"io"
 	"mime/multipart"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -21,6 +26,7 @@ import (
 	officialtypes "aurora/typings/official"
 
 	"github.com/gin-gonic/gin"
+	_ "golang.org/x/image/webp"
 )
 
 type ImageHandler struct {
@@ -140,6 +146,30 @@ func (h *ImageHandler) recordImageGenerationFailure(c *gin.Context, account *acc
 		return
 	}
 	rememberRequestFailure(c, "image_generation_failed")
+}
+
+// imageGenerationFailureResponse prevents internal ChatGPT schema dumps from
+// being shown to OpenAI-compatible clients. Those dumps can be thousands of
+// characters long and do not help a caller recover; the response still keeps
+// a stable machine-readable code for retries or account remediation.
+func imageGenerationFailureResponse(err error) (status int, message, code string) {
+	if errors.Is(err, chatgpt.ErrImageGenerationTimeout) {
+		return http.StatusGatewayTimeout, "Image generation timed out while waiting for the upstream result. Please retry.", "image_generation_timeout"
+	}
+
+	raw := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(raw, "status 422"):
+		return http.StatusBadGateway, "The upstream service rejected the uploaded image attachment. Please retry with PNG or JPEG.", "upstream_image_attachment_rejected"
+	case strings.Contains(raw, "content_policy") || strings.Contains(raw, "content policy"):
+		return http.StatusBadRequest, "The image request was rejected by the upstream content policy.", "image_content_policy_violation"
+	case strings.Contains(raw, "status 429") || strings.Contains(raw, "rate limit"):
+		return http.StatusTooManyRequests, "The upstream image service is busy. Please retry shortly.", "upstream_rate_limited"
+	case strings.Contains(raw, "status 401") || strings.Contains(raw, "status 403") || strings.Contains(raw, "unauthorized"):
+		return http.StatusServiceUnavailable, "The selected image account is no longer authorized. Please switch accounts or refresh it.", "image_account_unavailable"
+	default:
+		return http.StatusBadGateway, "The upstream image service failed to complete the request. Please retry.", "upstream_image_generation_failed"
+	}
 }
 
 // requestStreamFlag 解析 stream 参数,支持 JSON body 的 stream 字段或 ?stream=true 查询参数。
@@ -307,21 +337,23 @@ func (h *ImageHandler) Generations(c *gin.Context) {
 		imageResults, upstreamText, err := chatgpt.GeneratePictureConversationImagesWithProgress(client, account, turnStile, upstreamPrompt, imageRequest.Model, proxyUrl, progress)
 		if err != nil {
 			h.recordImageGenerationFailure(c, account, err)
+			status, message, code := imageGenerationFailureResponse(err)
 			if stream {
 				writeImageStreamEvent(c, "image.generation.error", gin.H{
 					"object":  "image.generation.error",
 					"index":   i,
 					"total":   imageRequest.N,
-					"message": err.Error(),
+					"message": message,
+					"code":    code,
 				})
 				writeImageStreamDone(c)
 				return
 			}
-			c.JSON(500, gin.H{"error": gin.H{
-				"message": err.Error(),
+			c.JSON(status, gin.H{"error": gin.H{
+				"message": message,
 				"type":    "image_generation_error",
 				"param":   nil,
-				"code":    "image_generation_error",
+				"code":    code,
 			}})
 			return
 		}
@@ -438,6 +470,57 @@ type editImageInput struct {
 	Data        []byte
 	Filename    string
 	ContentType string
+}
+
+// normalizeEditImageForUpload keeps source images predictable for the
+// ChatGPT file service. WebP is valid input for many clients, but web API
+// deployments do not consistently expose its dimensions or accept it as an
+// image edit attachment. Converting it to PNG preserves pixels and gives the
+// uploaded file unambiguous image metadata.
+func normalizeEditImageForUpload(input editImageInput) (editImageInput, error) {
+	if len(input.Data) == 0 {
+		return editImageInput{}, fmt.Errorf("image data is empty")
+	}
+	if int64(len(input.Data)) > imageflow.MaxImageBytes {
+		return editImageInput{}, fmt.Errorf("image exceeds the %d MiB limit", imageflow.MaxImageBytes>>20)
+	}
+
+	detectedType := http.DetectContentType(input.Data)
+	declaredType := strings.ToLower(strings.TrimSpace(strings.Split(input.ContentType, ";")[0]))
+	if declaredType == "" || declaredType == "application/octet-stream" {
+		input.ContentType = detectedType
+	} else {
+		input.ContentType = declaredType
+	}
+	if input.Filename == "" {
+		input.Filename = "image"
+	}
+
+	// Trust the file signature too: some clients label WebP as generic binary
+	// data, while others preserve an incorrect original content type.
+	if input.ContentType != "image/webp" && detectedType != "image/webp" {
+		return input, nil
+	}
+
+	decoded, _, err := image.Decode(bytes.NewReader(input.Data))
+	if err != nil {
+		return editImageInput{}, fmt.Errorf("decode WebP image: %w", err)
+	}
+	var pngData bytes.Buffer
+	if err := png.Encode(&pngData, decoded); err != nil {
+		return editImageInput{}, fmt.Errorf("convert WebP image to PNG: %w", err)
+	}
+	if int64(pngData.Len()) > imageflow.MaxImageBytes {
+		return editImageInput{}, fmt.Errorf("converted PNG exceeds the %d MiB limit", imageflow.MaxImageBytes>>20)
+	}
+	input.Data = pngData.Bytes()
+	input.ContentType = "image/png"
+	base := strings.TrimSuffix(input.Filename, filepath.Ext(input.Filename))
+	if base == "" {
+		base = "image"
+	}
+	input.Filename = base + ".png"
+	return input, nil
 }
 
 // imageEditImageReferenceFields 与 chatgpt2api/api/image_inputs.IMAGE_REFERENCE_FIELDS 对齐。
@@ -871,6 +954,19 @@ func (h *ImageHandler) runImageEditFlow(c *gin.Context, asVariation bool) {
 		}})
 		return
 	}
+	for i, source := range imageSources {
+		normalized, err := normalizeEditImageForUpload(source)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{
+				"message": "invalid image input: " + err.Error(),
+				"type":    "invalid_request_error",
+				"param":   fmt.Sprintf("image[%d]", i),
+				"code":    "invalid_image",
+			}})
+			return
+		}
+		imageSources[i] = normalized
+	}
 	upstreamPrompt, err := imagePromptWithPreferences(prompt, size, "")
 	if err != nil {
 		c.JSON(400, gin.H{"error": gin.H{
@@ -967,12 +1063,13 @@ func (h *ImageHandler) runImageEditFlow(c *gin.Context, asVariation bool) {
 			return
 		}
 		references = append(references, chatgpt.ImageEditReference{
-			FileID:   uploaded.FileID,
-			Width:    uploaded.Width,
-			Height:   uploaded.Height,
-			Size:     int(uploaded.Bytes),
-			MimeType: uploaded.MimeType,
-			Filename: uploaded.Filename,
+			FileID:        uploaded.FileID,
+			LibraryFileID: uploaded.LibraryFileID,
+			Width:         uploaded.Width,
+			Height:        uploaded.Height,
+			Size:          int(uploaded.Bytes),
+			MimeType:      uploaded.MimeType,
+			Filename:      uploaded.Filename,
 		})
 	}
 
@@ -996,21 +1093,23 @@ func (h *ImageHandler) runImageEditFlow(c *gin.Context, asVariation bool) {
 		imageResults, upstreamText, err := chatgpt.GeneratePictureConversationImagesWithReferencesProgress(client, account, turnStile, upstreamPrompt, model, proxyUrl, references, progress)
 		if err != nil {
 			h.recordImageGenerationFailure(c, account, err)
+			status, message, code := imageGenerationFailureResponse(err)
 			if stream {
 				writeImageStreamEvent(c, "image.generation.error", gin.H{
 					"object":  "image.generation.error",
 					"index":   i,
 					"total":   n,
-					"message": err.Error(),
+					"message": message,
+					"code":    code,
 				})
 				writeImageStreamDone(c)
 				return
 			}
-			c.JSON(500, gin.H{"error": gin.H{
-				"message": err.Error(),
+			c.JSON(status, gin.H{"error": gin.H{
+				"message": message,
 				"type":    "image_generation_error",
 				"param":   nil,
-				"code":    "image_generation_error",
+				"code":    code,
 			}})
 			return
 		}

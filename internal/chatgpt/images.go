@@ -34,12 +34,13 @@ const (
 
 // ImageEditReference 表示已上传到 ChatGPT 文件服务的一张源图。
 type ImageEditReference struct {
-	FileID   string
-	Width    int
-	Height   int
-	Size     int
-	MimeType string
-	Filename string
+	FileID        string
+	LibraryFileID string
+	Width         int
+	Height        int
+	Size          int
+	MimeType      string
+	Filename      string
 }
 
 type fileInfo struct {
@@ -554,65 +555,7 @@ func generatePictureConversationImagesWithReferences(client httpclient.AuroraHtt
 		return nil, "", err
 	}
 
-	// 组装 message.parts:每个 reference -> image_asset_pointer,然后追加 prompt 文本
-	parts := make([]interface{}, 0, len(references)+1)
-	attachments := make([]map[string]interface{}, 0, len(references))
-	for _, ref := range references {
-		if ref.FileID == "" {
-			continue
-		}
-		part := map[string]interface{}{
-			"content_type":  "image_asset_pointer",
-			"asset_pointer": "file-service://" + ref.FileID,
-		}
-		if ref.Width > 0 {
-			part["width"] = ref.Width
-		}
-		if ref.Height > 0 {
-			part["height"] = ref.Height
-		}
-		if ref.Size > 0 {
-			part["size_bytes"] = ref.Size
-		}
-		parts = append(parts, part)
-
-		attachment := map[string]interface{}{
-			"id":       ref.FileID,
-			"size":     ref.Size,
-			"name":     ref.Filename,
-			"mime":     ref.MimeType,
-			"mimeType": ref.MimeType,
-			"source":   "library",
-		}
-		if ref.Width > 0 {
-			attachment["width"] = ref.Width
-		}
-		if ref.Height > 0 {
-			attachment["height"] = ref.Height
-		}
-		attachments = append(attachments, attachment)
-	}
-	if prompt != "" {
-		parts = append(parts, prompt)
-	}
-
-	var content map[string]interface{}
-	if len(parts) == 0 {
-		content = map[string]interface{}{"content_type": "text", "parts": []string{prompt}}
-	} else {
-		content = map[string]interface{}{"content_type": "multimodal_text", "parts": parts}
-	}
-
-	metadata := map[string]interface{}{
-		"developer_mode_connector_ids": []interface{}{},
-		"selected_github_repos":        []interface{}{},
-		"selected_all_github_repos":    false,
-		"system_hints":                 []string{"picture_v2"},
-		"serialization_metadata":       map[string]interface{}{"custom_symbol_offsets": []interface{}{}},
-	}
-	if len(attachments) > 0 {
-		metadata["attachments"] = attachments
-	}
+	content, metadata := buildImageEditMessageContent(references, prompt)
 
 	payload := map[string]interface{}{
 		"action": "next",
@@ -663,4 +606,77 @@ func generatePictureConversationImagesWithReferences(client httpclient.AuroraHtt
 		return results, upstreamText, err
 	}
 	return results, upstreamText, nil
+}
+
+// buildImageEditMessageContent keeps image-edit attachments aligned with the
+// regular multimodal conversation path. ChatGPT validates these fields as a
+// unit; omitting the library id or MIME metadata can make an otherwise valid
+// image_asset_pointer fail schema validation on some web API deployments.
+func buildImageEditMessageContent(references []ImageEditReference, prompt string) (map[string]interface{}, map[string]interface{}) {
+	// 组装 message.parts:每个 reference -> image_asset_pointer,然后追加 prompt 文本
+	parts := make([]interface{}, 0, len(references)+1)
+	attachments := make([]map[string]interface{}, 0, len(references))
+	for _, ref := range references {
+		if ref.FileID == "" {
+			continue
+		}
+		part := map[string]interface{}{
+			"content_type":  "image_asset_pointer",
+			"asset_pointer": "file-service://" + ref.FileID,
+		}
+		if ref.Width > 0 {
+			part["width"] = ref.Width
+		}
+		if ref.Height > 0 {
+			part["height"] = ref.Height
+		}
+		if ref.Size > 0 {
+			part["size_bytes"] = ref.Size
+		}
+		parts = append(parts, part)
+
+		attachment := map[string]interface{}{
+			"id":           ref.FileID,
+			"size":         ref.Size,
+			"name":         ref.Filename,
+			"mime_type":    ref.MimeType,
+			"mimeType":     ref.MimeType,
+			"source":       "library",
+			"is_big_paste": false,
+		}
+		if ref.LibraryFileID != "" {
+			attachment["library_file_id"] = ref.LibraryFileID
+		}
+		if ref.Width > 0 {
+			attachment["width"] = ref.Width
+		}
+		if ref.Height > 0 {
+			attachment["height"] = ref.Height
+		}
+		attachments = append(attachments, attachment)
+	}
+	if prompt != "" {
+		parts = append(parts, prompt)
+	}
+
+	var content map[string]interface{}
+	if len(parts) == 0 {
+		content = map[string]interface{}{"content_type": "text", "parts": []string{prompt}}
+	} else {
+		content = map[string]interface{}{"content_type": "multimodal_text", "parts": parts}
+	}
+
+	metadata := map[string]interface{}{
+		"developer_mode_connector_ids": []interface{}{},
+		"selected_sources":             []interface{}{},
+		"selected_github_repos":        []interface{}{},
+		"selected_all_github_repos":    false,
+		"system_hints":                 []string{"picture_v2"},
+		"serialization_metadata":       map[string]interface{}{"custom_symbol_offsets": []interface{}{}},
+	}
+	if len(attachments) > 0 {
+		metadata["attachments"] = attachments
+	}
+
+	return content, metadata
 }
