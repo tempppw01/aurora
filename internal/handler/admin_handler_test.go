@@ -354,6 +354,56 @@ func TestRequestLogsCaptureStatusAndAccountWithoutCredential(t *testing.T) {
 	}
 }
 
+func TestRequestLoggerMarksManagedAccountOnForbidden(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	dir := t.TempDir()
+	pool := accounts.NewPool(nil)
+	h := NewAdminHandler(pool, &config.Config{AdminToken: "admin-secret"})
+	h.requestLogs = NewRequestLogStore(filepath.Join(dir, "request_logs.json"), 10)
+	h.files = map[string]string{"free": filepath.Join(dir, "free_tokens.txt")}
+	h.metadataPath = filepath.Join(dir, "account_metadata.json")
+
+	credential := "9ca8b1b6-707f-4c1b-a1e0-d007839ae597"
+	if err := writeCredentials(h.files["free"], []accounts.RawToken{{Token: credential}}); err != nil {
+		t.Fatalf("write account: %v", err)
+	}
+	acct := accounts.NewAccount("managed-free", accounts.TypeFree, credential)
+	pool.AddAccount(acct)
+
+	router := gin.New()
+	router.GET("/v1/forbidden", h.RequestLogger, func(c *gin.Context) {
+		rememberRequestAccount(c, acct)
+		c.Status(http.StatusForbidden)
+	})
+	router.GET("/v1/bad-request", h.RequestLogger, func(c *gin.Context) {
+		rememberRequestAccount(c, acct)
+		c.Status(http.StatusBadRequest)
+	})
+
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/forbidden", nil))
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("forbidden status = %d", response.Code)
+	}
+
+	id := managedAccountID("free", credential)
+	metadata := h.loadMetadata()
+	meta := metadata[id]
+	if meta.RequestIssue != "访问被拒绝" || meta.RequestStatus != http.StatusForbidden || meta.RequestIssueAt == "" {
+		t.Fatalf("forbidden marker = %#v", meta)
+	}
+
+	response = httptest.NewRecorder()
+	router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/bad-request", nil))
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("bad request status = %d", response.Code)
+	}
+	metadata = h.loadMetadata()
+	if got := metadata[id]; got.RequestStatus != http.StatusForbidden || got.RequestIssue != "访问被拒绝" {
+		t.Fatalf("400 request unexpectedly changed marker: %#v", got)
+	}
+}
+
 func TestAdminHandlerRequiresConfiguredToken(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	h := NewAdminHandler(accounts.NewPool(nil), &config.Config{})

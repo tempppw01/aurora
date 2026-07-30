@@ -263,6 +263,7 @@ func (h *AdminHandler) RequestLogger(c *gin.Context) {
 		if account, ok := value.(*accounts.Account); ok && account != nil {
 			entry.AccountType = account.Type.String()
 			entry.Account = h.requestAccountLabel(account)
+			h.recordRequestAccountIssue(account, entry.StatusCode, entry.ErrorCode)
 		}
 	}
 	h.requestLogs.append(entry)

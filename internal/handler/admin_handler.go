@@ -30,15 +30,18 @@ var adminPage []byte
 var accountFileMu sync.Mutex
 
 type managedAccount struct {
-	ID         string `json:"id"`
-	Source     string `json:"source"`
-	Token      string `json:"token"`
-	TeamID     string `json:"team_id,omitempty"`
-	Email      string `json:"email,omitempty"`
-	ImportedAt string `json:"imported_at,omitempty"`
-	Status     string `json:"status,omitempty"`
-	Health     string `json:"health,omitempty"`
-	CheckedAt  string `json:"checked_at,omitempty"`
+	ID             string `json:"id"`
+	Source         string `json:"source"`
+	Token          string `json:"token"`
+	TeamID         string `json:"team_id,omitempty"`
+	Email          string `json:"email,omitempty"`
+	ImportedAt     string `json:"imported_at,omitempty"`
+	Status         string `json:"status,omitempty"`
+	Health         string `json:"health,omitempty"`
+	CheckedAt      string `json:"checked_at,omitempty"`
+	RequestIssue   string `json:"request_issue,omitempty"`
+	RequestStatus  int    `json:"request_status,omitempty"`
+	RequestIssueAt string `json:"request_issue_at,omitempty"`
 }
 
 type addManagedAccountRequest struct {
@@ -59,11 +62,14 @@ type credentialBundle struct {
 }
 
 type accountMetadata struct {
-	Email      string `json:"email,omitempty"`
-	ImportedAt string `json:"imported_at"`
-	Status     string `json:"status"`
-	Health     string `json:"health,omitempty"`
-	CheckedAt  string `json:"checked_at,omitempty"`
+	Email          string `json:"email,omitempty"`
+	ImportedAt     string `json:"imported_at"`
+	Status         string `json:"status"`
+	Health         string `json:"health,omitempty"`
+	CheckedAt      string `json:"checked_at,omitempty"`
+	RequestIssue   string `json:"request_issue,omitempty"`
+	RequestStatus  int    `json:"request_status,omitempty"`
+	RequestIssueAt string `json:"request_issue_at,omitempty"`
 }
 
 type apiKeyRequest struct {
@@ -193,15 +199,18 @@ func (h *AdminHandler) ListAccounts(c *gin.Context) {
 				email = emailFromCredential(raw.Token)
 			}
 			result = append(result, managedAccount{
-				ID:         id,
-				Source:     source,
-				Token:      maskCredential(raw.Token),
-				TeamID:     raw.TeamID,
-				Email:      email,
-				ImportedAt: meta.ImportedAt,
-				Status:     meta.Status,
-				Health:     meta.Health,
-				CheckedAt:  meta.CheckedAt,
+				ID:             id,
+				Source:         source,
+				Token:          maskCredential(raw.Token),
+				TeamID:         raw.TeamID,
+				Email:          email,
+				ImportedAt:     meta.ImportedAt,
+				Status:         meta.Status,
+				Health:         meta.Health,
+				CheckedAt:      meta.CheckedAt,
+				RequestIssue:   meta.RequestIssue,
+				RequestStatus:  meta.RequestStatus,
+				RequestIssueAt: meta.RequestIssueAt,
 			})
 		}
 	}
@@ -287,6 +296,66 @@ func (h *AdminHandler) requestAccountLabel(account *accounts.Account) string {
 		return "账号 " + account.ID[:8]
 	}
 	return "账号 " + account.ID
+}
+
+// recordRequestAccountIssue persists a compact operational marker on the
+// managed account that served a failed request. It deliberately stores only a
+// stable category, HTTP status, and timestamp—never a prompt, response body,
+// credential, or upstream URL. The marker is informational and does not
+// disable the account automatically because a 403 can also mean model or
+// request permissions rather than a broken login.
+func (h *AdminHandler) recordRequestAccountIssue(account *accounts.Account, status int, errorCode string) {
+	issue := requestAccountIssue(status, errorCode)
+	if account == nil || issue == "" {
+		return
+	}
+
+	accountFileMu.Lock()
+	defer accountFileMu.Unlock()
+	metadata := h.loadMetadata()
+	for source, path := range h.files {
+		for _, raw := range accounts.LoadTokensFromFile(path) {
+			if raw.Token != account.Token && raw.Token != account.RefreshToken && raw.Token != account.SessionToken {
+				continue
+			}
+			id := managedAccountID(source, raw.Token)
+			meta := metadata[id]
+			if meta.Email == "" {
+				meta.Email = emailFromCredential(raw.Token)
+			}
+			meta.RequestIssue = issue
+			meta.RequestStatus = status
+			meta.RequestIssueAt = time.Now().UTC().Format(time.RFC3339)
+			metadata[id] = meta
+			_ = h.saveMetadata(metadata)
+			return
+		}
+	}
+}
+
+func requestAccountIssue(status int, errorCode string) string {
+	code := strings.ToLower(strings.TrimSpace(errorCode))
+	switch {
+	case strings.Contains(code, "account_auth") || status == http.StatusUnauthorized:
+		return "授权异常"
+	case status == http.StatusForbidden:
+		return "访问被拒绝"
+	case strings.Contains(code, "rate_limit") || status == http.StatusTooManyRequests:
+		return "请求限流"
+	case status >= http.StatusInternalServerError:
+		return "服务异常"
+	default:
+		return ""
+	}
+}
+
+func clearRequestAccountIssue(meta *accountMetadata) {
+	if meta == nil {
+		return
+	}
+	meta.RequestIssue = ""
+	meta.RequestStatus = 0
+	meta.RequestIssueAt = ""
 }
 
 // ExportAccounts downloads every persisted account credential as a JSON
@@ -496,6 +565,11 @@ func (h *AdminHandler) CheckAccountHealth(c *gin.Context) {
 	meta := metadata[id]
 	meta.Health = health
 	meta.CheckedAt = checkedAt
+	if alive {
+		// A successful direct authentication check confirms that the account
+		// is usable again, so remove the prior request-error marker.
+		clearRequestAccountIssue(&meta)
+	}
 	metadata[id] = meta
 	metadataErr := h.saveMetadata(metadata)
 	accountFileMu.Unlock()
