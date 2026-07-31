@@ -17,6 +17,7 @@ account_metadata.json
 .claude/
 .gocache
 .atomcode
+.workbuddy/
 CLAUDE.md
 MIGRATION_PLAN.md
 his.md

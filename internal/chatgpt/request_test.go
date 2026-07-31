@@ -921,6 +921,12 @@ func TestPrepareConversationConduitUsesClientState(t *testing.T) {
 	if payload["parent_message_id"] != "parent-state" {
 		t.Fatalf("parent_message_id = %#v, want parent-state", payload["parent_message_id"])
 	}
+	if payload["supports_buffering"] != true {
+		t.Fatalf("supports_buffering = %#v, want prepare capability", payload["supports_buffering"])
+	}
+	if _, ok := payload["supported_encodings"].([]interface{}); !ok {
+		t.Fatalf("supported_encodings missing: %#v", payload)
+	}
 	contextInfo, ok := payload["client_contextual_info"].(map[string]interface{})
 	if !ok {
 		t.Fatalf("client_contextual_info missing: %#v", payload)
@@ -928,6 +934,41 @@ func TestPrepareConversationConduitUsesClientState(t *testing.T) {
 	loaded, ok := contextInfo["time_since_loaded"].(float64)
 	if !ok || loaded < 2 || loaded > 5 {
 		t.Fatalf("time_since_loaded = %#v, want dynamic seconds around 3", contextInfo["time_since_loaded"])
+	}
+}
+
+func TestConversationCompletionOmitsRiskyCapabilityFields(t *testing.T) {
+	client := &fakeAuroraClient{
+		response: &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader("")),
+		},
+	}
+	request := chatGPTRequestForTest()
+	request.EnableMessageFollowups = true
+	request.SupportsBuffering = true
+	request.SupportedEncodings = []string{"v1"}
+	request.ClientContextualInfo = map[string]interface{}{"app_name": "chatgpt.com"}
+
+	response, err := POSTconversationPreparedWithState(client, request, &accounts.Account{}, nil, "", "conduit", "trace", NewChatClientState())
+	if err != nil {
+		t.Fatalf("POSTconversationPreparedWithState returned error: %v", err)
+	}
+	if response == nil || response.StatusCode != http.StatusOK {
+		t.Fatalf("response = %#v, want HTTP 200", response)
+	}
+
+	var payload map[string]interface{}
+	if err := json.Unmarshal([]byte(client.body), &payload); err != nil {
+		t.Fatalf("completion body is invalid json: %v", err)
+	}
+	for _, key := range []string{"enable_message_followups", "supports_buffering", "supported_encodings", "client_contextual_info"} {
+		if _, ok := payload[key]; ok {
+			t.Fatalf("completion request unexpectedly includes %s: %#v", key, payload[key])
+		}
+	}
+	if payload["client_prepare_state"] != "success" {
+		t.Fatalf("client_prepare_state = %#v, want success", payload["client_prepare_state"])
 	}
 }
 
