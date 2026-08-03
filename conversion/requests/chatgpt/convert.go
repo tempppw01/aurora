@@ -26,23 +26,16 @@ func ConvertAPIRequest(api_request official_types.APIRequest, account *accounts.
 
 	// ── 映射 OpenAI 标准生成参数到 ChatGPT ──
 
-	// reasoning_effort → ThinkingEffort。保留 ChatGPT 原有的 standard
-	// 默认值，避免向不接受 medium 的上游发送无效会话请求。
-	effort := strings.ToLower(strings.TrimSpace(api_request.ReasoningEffort))
-	if effort == "" {
-		effort = "standard"
-	}
-	switch effort {
-	case "none", "minimal":
-		chatgpt_request.ThinkingEffort = "low"
-	case "low":
-		chatgpt_request.ThinkingEffort = "low"
-	case "medium", "standard":
+	// reasoning_effort → ChatGPT Web 的 thinking_effort 枚举。
+	// 上游只接受 standard / extended / max；发送 OpenAI 的 low / medium / high
+	// 会导致 /f/conversation 返回 422 "Invalid conversation body"。
+	switch strings.ToLower(strings.TrimSpace(api_request.ReasoningEffort)) {
+	case "none", "minimal", "low", "standard", "":
 		chatgpt_request.ThinkingEffort = "standard"
-	case "high":
-		chatgpt_request.ThinkingEffort = "high"
-	case "xhigh", "max":
-		chatgpt_request.ThinkingEffort = "high"
+	case "medium", "extended":
+		chatgpt_request.ThinkingEffort = "extended"
+	case "high", "xhigh", "max":
+		chatgpt_request.ThinkingEffort = "max"
 	default:
 		chatgpt_request.ThinkingEffort = "standard"
 	}

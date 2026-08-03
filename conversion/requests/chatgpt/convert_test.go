@@ -30,23 +30,33 @@ func TestConvertAPIRequestNoToolsNoInjection(t *testing.T) {
 	}
 }
 
-func TestConvertAPIRequestMapsExtendedReasoningEffort(t *testing.T) {
-	cases := map[string]string{
-		"none":     "low",
-		"minimal":  "low",
-		"low":      "low",
-		"medium":   "standard",
-		"standard": "standard",
-		"high":     "high",
-		"xhigh":    "high",
-		"max":      "high",
-		"unknown":  "standard",
+func TestConvertAPIRequestMapsReasoningEffortToWebEnum(t *testing.T) {
+	tests := []struct {
+		name   string
+		effort string
+		want   string
+	}{
+		{name: "default", effort: "", want: "standard"},
+		{name: "minimal", effort: "minimal", want: "standard"},
+		{name: "low", effort: "low", want: "standard"},
+		{name: "medium", effort: "medium", want: "extended"},
+		{name: "standard", effort: "standard", want: "standard"},
+		{name: "extended", effort: "extended", want: "extended"},
+		{name: "high", effort: "high", want: "max"},
+		{name: "xhigh", effort: "xhigh", want: "max"},
+		{name: "max", effort: "max", want: "max"},
+		{name: "unknown", effort: "turbo", want: "standard"},
 	}
-	for effort, want := range cases {
-		t.Run(effort, func(t *testing.T) {
-			out := testConvert(t, official.APIRequest{ReasoningEffort: effort, Messages: []official.APIMessage{official.NewTextMessage("user", "hi")}})
-			if out.ThinkingEffort != want {
-				t.Fatalf("ThinkingEffort = %q, want %q", out.ThinkingEffort, want)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out := testConvert(t, official.APIRequest{
+				Model:           "gpt-5",
+				ReasoningEffort: tt.effort,
+				Messages:        []official.APIMessage{official.NewTextMessage("user", "hi")},
+			})
+			if out.ThinkingEffort != tt.want {
+				t.Fatalf("ThinkingEffort = %q, want %q", out.ThinkingEffort, tt.want)
 			}
 		})
 	}
