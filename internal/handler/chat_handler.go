@@ -616,11 +616,8 @@ func (h *ChatHandler) handleToolCalling(c *gin.Context, originalRequest *officia
 			}})
 			return
 		}
-		_ = wsConn
-		_ = status
-
 		result := chatgpt.HandlerDetailedWithOptions(c, response, *client, account, *uid, translated, false, *reqModel, chatgpt.HandlerDetailedOptions{
-			Websocket:        nil,
+			Websocket:        wsConn,
 			ClientState:      *clientState,
 			ArtifactDelivery: originalRequest.ArtifactDelivery,
 			ProxyURL:         *proxyUrl,

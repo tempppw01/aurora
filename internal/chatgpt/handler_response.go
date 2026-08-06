@@ -183,13 +183,15 @@ func HandlerDetailedWithOptions(c *gin.Context, response *http.Response, client 
 	writeStream := stream && !options.SuppressStreamOutput
 
 	reader := bufio.NewReader(response.Body)
-	if stream && client != nil && account != nil {
-		if wsConn == nil {
-			if conn, err := DialChatWebsocketWithStateAndProxy(client, account, options.ClientState, options.ProxyURL); err == nil {
-				wsConn = conn
-				defer wsConn.Close()
-			}
-		} else {
+	if wsConn != nil {
+		// The orchestration layer may establish this connection for a
+		// non-streaming extended/max request before posting the conversation.
+		defer wsConn.Close()
+	} else if stream && client != nil && account != nil {
+		// Preserve the fallback for streaming callers that did not establish a
+		// WebSocket before entering the response handler.
+		if conn, err := DialChatWebsocketWithStateAndProxy(client, account, options.ClientState, options.ProxyURL); err == nil {
+			wsConn = conn
 			defer wsConn.Close()
 		}
 	}
