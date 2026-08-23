@@ -102,7 +102,7 @@ func GetDpl(client httpclient.AuroraHttpClient, proxy string) {
 	}
 }
 
-// defaultUserAgent 返回全局统一的 User-Agent (Chrome 148 Windows)。
+// defaultUserAgent 返回全局统一的 User-Agent (Chrome 150 Windows)。
 func defaultUserAgent() string {
 	return util.FixedUserAgent
 }

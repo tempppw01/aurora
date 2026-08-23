@@ -32,7 +32,7 @@ func NewStdClientWithTimeout(timeoutSeconds int) *TlsClient {
 	client, _ := tls_client.NewHttpClient(tls_client.NewNoopLogger(), []tls_client.HttpClientOption{
 		tls_client.WithCookieJar(tls_client.NewCookieJar()),
 		tls_client.WithTimeoutSeconds(timeoutSeconds),
-		tls_client.WithClientProfile(profiles.Chrome_146),
+		tls_client.WithClientProfile(profiles.Chrome_150),
 	}...)
 
 	stdClient := &TlsClient{Client: client}

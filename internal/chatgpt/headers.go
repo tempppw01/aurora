@@ -74,7 +74,7 @@ func conversationHeadersWithState(account *accounts.Account, chatToken *TurnStil
 		WithTeamAccount(account)
 
 	if chatToken != nil {
-		soToken := chatToken.ensureSOToken(soDeviceIDFor(account))
+		soToken := chatToken.ensureSOToken(deviceID)
 		b.WithSentinelTokens(headerbuilder.SentinelTokens{
 			TurnStileToken:               chatToken.TurnStileToken,
 			ChatRequirementsPrepareToken: chatToken.ChatRequirementsPrepareToken,

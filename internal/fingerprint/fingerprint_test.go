@@ -3,13 +3,26 @@ package fingerprint
 import (
 	"fmt"
 	"math/rand"
+	"strings"
 	"testing"
+	"time"
 )
+
+func TestJSDateToStringPadsDayOfMonth(t *testing.T) {
+	loc, err := time.LoadLocation("America/Los_Angeles")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := jsDateToString(time.Date(2026, time.August, 2, 12, 0, 0, 0, loc))
+	if !strings.Contains(got, "Aug 02 2026") {
+		t.Fatalf("Date.toString day is not zero-padded: %q", got)
+	}
+}
 
 func TestBuild25_MatchesSample(t *testing.T) {
 	stableRand := rand.New(rand.NewSource(42))
 	opts := Options{
-		UserAgent:           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
+		UserAgent:           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36",
 		Languages:           []string{"en-US", "en"},
 		Platform:            "Win32",
 		ScreenWidth:         1920,

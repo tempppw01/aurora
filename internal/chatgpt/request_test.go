@@ -972,10 +972,10 @@ func TestCreateBaseHeaderMatchesWebClientShape(t *testing.T) {
 	if first["Accept-Language"] != "en-US,en;q=0.9" {
 		t.Fatalf("Accept-Language = %q, want en-US,en;q=0.9", first["Accept-Language"])
 	}
-	// UA must be the Chrome 148 variant to match sec-ch-ua="Google Chrome";"v="148"
+	// UA must be the Chrome 150 variant to match sec-ch-ua="Google Chrome";"v="150"
 	ua := first["User-Agent"]
-	if !strings.Contains(ua, "Chrome/148.") {
-		t.Fatalf("User-Agent = %q, want Chrome 148 to match sec-ch-ua=Chrome 148", ua)
+	if !strings.Contains(ua, "Chrome/150.") {
+		t.Fatalf("User-Agent = %q, want Chrome 150 to match sec-ch-ua=Chrome 150", ua)
 	}
 	if strings.Contains(ua, "Edg/") {
 		t.Fatalf("User-Agent = %q, must not be Edge variant (conversation.txt uses Chrome)", ua)
@@ -987,15 +987,15 @@ func TestCreateBaseHeaderMatchesWebClientShape(t *testing.T) {
 		t.Fatalf("Oai-Session-Id should be stable across headers: first=%q second=%q", first["Oai-Session-Id"], second["Oai-Session-Id"])
 	}
 	// 对齐 2026-06-26 浏览器抓包
-	if first["Oai-Client-Version"] != "prod-dbbd612ddb47498515c3eecf8579bcafa0066e07" {
-		t.Fatalf("Oai-Client-Version = %q, want prod-dbbd612ddb47498515c3eecf8579bcafa0066e07", first["Oai-Client-Version"])
+	if first["Oai-Client-Version"] != "prod-46437587156517d920436051cb9ab60a95f0503a" {
+		t.Fatalf("Oai-Client-Version = %q, want prod-46437587156517d920436051cb9ab60a95f0503a", first["Oai-Client-Version"])
 	}
 	if first["Oai-Client-Build-Number"] != "7823760" {
 		t.Fatalf("Oai-Client-Build-Number = %q, want 7823760", first["Oai-Client-Build-Number"])
 	}
-	// sec-ch-ua 必须跟 UA 一致(都是 Chrome 148)
-	if first["Sec-Ch-Ua"] != `"Chromium";v="148", "Google Chrome";v="148", "Not/A)Brand";v="99"` {
-		t.Fatalf("Sec-Ch-Ua = %q, want Chrome 148", first["Sec-Ch-Ua"])
+	// sec-ch-ua 必须跟 UA 一致(都是 Chrome 150)
+	if first["Sec-Ch-Ua"] != `"Chromium";v="150", "Google Chrome";v="150", "Not/A)Brand";v="99"` {
+		t.Fatalf("Sec-Ch-Ua = %q, want Chrome 150", first["Sec-Ch-Ua"])
 	}
 }
 

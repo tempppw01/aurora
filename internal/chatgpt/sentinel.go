@@ -39,6 +39,7 @@ type TurnStile struct {
 	soChatToken                 string
 	soFlow                      string
 	soOnce                      sync.Once
+	soMu                        sync.Mutex
 	soResult                    string
 	soErr                       error
 }
@@ -149,12 +150,8 @@ func GetInitConfig() []interface{} {
 }
 
 // CalcProofToken 计算 proof-of-work token。
-func CalcProofToken(require *ChatRequire, state *ChatClientState) string {
-	ua := defaultUserAgent()
-	if state != nil && state.UserAgent != "" {
-		ua = state.UserAgent
-	}
-	return prooftoken.SolveProofToken(require.Proof.Seed, require.Proof.Difficulty, ua)
+func CalcProofToken(require *ChatRequire, config *prooftoken.Config) string {
+	return config.SolveProofOfWork(require.Proof.Seed, require.Proof.Difficulty)
 }
 
 // InitTurnStileWithState 初始化 TurnStile（等同于 InitSentinelWithState 但 retry=0）。
@@ -176,7 +173,9 @@ func InitSentinelWithState(client httpclient.AuroraHttpClient, account *accounts
 	if state != nil && state.UserAgent != "" {
 		ua = state.UserAgent
 	}
-	requirementsToken := prooftoken.NewConfig(ua).RequirementsToken()
+	proofConfig := prooftoken.NewConfig(ua)
+	proofConfig.DeviceID = sentinelDeviceID(account, state)
+	requirementsToken := proofConfig.RequirementsToken()
 
 	prepare, status, err := POSTSentinelPrepareWithState(client, account, requirementsToken, state)
 	if err != nil {
@@ -204,7 +203,7 @@ func InitSentinelWithState(client httpclient.AuroraHttpClient, account *accounts
 
 	var proofToken string
 	if prepare.Proof.Required {
-		proofToken = CalcProofToken(prepare, state)
+		proofToken = CalcProofToken(prepare, proofConfig)
 		if proofToken == "" {
 			return nil, http.StatusForbidden, errors.New("calculation proof token failure. Please retry the operation")
 		}
@@ -256,6 +255,19 @@ func InitSentinelWithState(client httpclient.AuroraHttpClient, account *accounts
 	return ts, status, nil
 }
 
+func sentinelDeviceID(account *accounts.Account, state *ChatClientState) string {
+	if state != nil && state.DeviceID != "" {
+		return state.DeviceID
+	}
+	if account != nil && account.Fingerprint.OaiDeviceID != "" {
+		return account.Fingerprint.OaiDeviceID
+	}
+	if account != nil && account.Type == accounts.TypeNoAuth && account.Token != "" {
+		return account.Token
+	}
+	return oaiDeviceID
+}
+
 // stateFlow 推导 so token 里的 flow 字段。
 func stateFlow(state *ChatClientState, ua string) string {
 	if state != nil && state.DeviceID != "" {
@@ -267,17 +279,12 @@ func stateFlow(state *ChatClientState, ua string) string {
 	return "chatgpt"
 }
 
-// soDeviceIDFor 给出 openai-sentinel-so-token 的 deviceID 参数。
-func soDeviceIDFor(account *accounts.Account) string {
-	if account != nil && account.Token != "" {
-		return account.Token
-	}
-	return ""
-}
-
 // ensureSOToken 懒求值 openai-sentinel-so-token header 值。
 func (ts *TurnStile) ensureSOToken(deviceID string) string {
-	if ts == nil || ts.soSession == nil {
+	if ts == nil {
+		return ""
+	}
+	if ts.soSession == nil {
 		return ts.SOToken
 	}
 	ts.soOnce.Do(func() {
@@ -291,6 +298,8 @@ func (ts *TurnStile) ensureSOToken(deviceID string) string {
 	if ts.soErr != nil {
 		return ""
 	}
+	ts.soMu.Lock()
+	defer ts.soMu.Unlock()
 	if ts.SOToken != "" {
 		return ts.SOToken
 	}
@@ -361,7 +370,7 @@ func POSTSentinelPingWithSource(client httpclient.AuroraHttpClient, account *acc
 		if ts.ProofOfWorkToken != "" {
 			header.Set("Openai-Sentinel-Proof-Token", ts.ProofOfWorkToken)
 		}
-		if soToken := ts.ensureSOToken(soDeviceIDFor(account)); soToken != "" {
+		if soToken := ts.ensureSOToken(sentinelDeviceID(account, state)); soToken != "" {
 			header.Set("Openai-Sentinel-So-Token", soToken)
 		}
 		extraData := buildSentinelExtraData(
@@ -369,7 +378,7 @@ func POSTSentinelPingWithSource(client httpclient.AuroraHttpClient, account *acc
 			lastMessageID,
 			ts.ChatRequirementsPrepareToken,
 			ts.ChatRequirementsToken,
-			ts.ensureSOToken(soDeviceIDFor(account)) != "",
+			ts.ensureSOToken(sentinelDeviceID(account, state)) != "",
 			ts.TurnstileToken != "",
 			ts.ProofOfWorkToken != "",
 			pingSource,
@@ -472,11 +481,13 @@ func buildSentinelReqToken(state *ChatClientState, account *accounts.Account) st
 
 	opts := fingerprint.Options{
 		UserAgent:           ua,
+		Platform:            fp.Platform,
 		ScreenWidth:         fp.ScreenWidth,
 		ScreenHeight:        fp.ScreenHeight,
 		HardwareConcurrency: fp.HardwareConcurrency,
 		JSHeapSizeLimit:     fp.JSHeapSizeLimit,
 		BuildID:             fp.BuildID,
+		Timezone:            fp.Timezone,
 		Languages:           strings.Split(browserfp.LanguageJoin(fp.Language), ","),
 		Rand:                rng,
 	}
