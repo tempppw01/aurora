@@ -67,3 +67,33 @@ func TestBuildImageEditMessageContentKeepsAllReferencesInOrder(t *testing.T) {
 		t.Fatalf("attachments = %#v, want both references in order", attachments)
 	}
 }
+
+func TestCollectImageResultsFromConversationExcludesInputReferences(t *testing.T) {
+	conversation := map[string]interface{}{
+		"mapping": map[string]interface{}{
+			"input": map[string]interface{}{
+				"message": map[string]interface{}{
+					"author": map[string]interface{}{"role": "user"},
+					"content": map[string]interface{}{
+						"content_type": "multimodal_text",
+						"parts":        []interface{}{map[string]interface{}{"asset_pointer": "file-service://file-input123"}},
+					},
+				},
+			},
+			"output": map[string]interface{}{
+				"message": map[string]interface{}{
+					"author": map[string]interface{}{"role": "assistant"},
+					"content": map[string]interface{}{
+						"content_type": "multimodal_text",
+						"parts":        []interface{}{map[string]interface{}{"url": "https://example.test/generated.png"}},
+					},
+				},
+			},
+		},
+	}
+
+	results := collectImageResultsFromConversation(nil, nil, conversation, map[string]bool{"file-input123": true})
+	if len(results) != 1 || results[0].URL != "https://example.test/generated.png" {
+		t.Fatalf("results = %#v, want only the generated image", results)
+	}
+}

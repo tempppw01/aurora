@@ -166,8 +166,14 @@ func fileDownloadBaseURL() string {
 	return strings.TrimRight(apiURL, "/") + "/"
 }
 
-func appendAssetPointerResult(client httpclient.AuroraHttpClient, account *accounts.Account, results *[]ImageGenerationResult, seen map[string]bool, assetPointer string) {
+func appendAssetPointerResult(client httpclient.AuroraHttpClient, account *accounts.Account, results *[]ImageGenerationResult, seen map[string]bool, excludedFileIDs map[string]bool, assetPointer string) {
 	if assetPointer == "" {
+		return
+	}
+	if excludedFileIDs != nil && excludedFileIDs[extractFileID(assetPointer)] {
+		return
+	}
+	if client == nil {
 		return
 	}
 	assetParts := strings.Split(assetPointer, "//")
@@ -181,8 +187,14 @@ func appendAssetPointerResult(client httpclient.AuroraHttpClient, account *accou
 	addImageResult(results, seen, ImageGenerationResult{URL: downloadURL})
 }
 
-func appendFileIDResult(client httpclient.AuroraHttpClient, account *accounts.Account, results *[]ImageGenerationResult, seen map[string]bool, fileID string) {
+func appendFileIDResult(client httpclient.AuroraHttpClient, account *accounts.Account, results *[]ImageGenerationResult, seen map[string]bool, excludedFileIDs map[string]bool, fileID string) {
 	if fileID == "" {
+		return
+	}
+	if excludedFileIDs != nil && excludedFileIDs[extractFileID(fileID)] {
+		return
+	}
+	if client == nil {
 		return
 	}
 	downloadURL, err := GetImageDownloadURL(client, fileDownloadBaseURL()+fileID+"/download", account)
@@ -192,7 +204,7 @@ func appendFileIDResult(client httpclient.AuroraHttpClient, account *accounts.Ac
 	addImageResult(results, seen, ImageGenerationResult{URL: downloadURL})
 }
 
-func collectImageResultsFromValue(client httpclient.AuroraHttpClient, account *accounts.Account, value interface{}, results *[]ImageGenerationResult, seen map[string]bool) {
+func collectImageResultsFromValue(client httpclient.AuroraHttpClient, account *accounts.Account, value interface{}, results *[]ImageGenerationResult, seen map[string]bool, excludedFileIDs map[string]bool) {
 	switch item := value.(type) {
 	case map[string]interface{}:
 		if result, ok := item["result"].(string); ok && result != "" {
@@ -202,12 +214,12 @@ func collectImageResultsFromValue(client httpclient.AuroraHttpClient, account *a
 		}
 		for _, key := range []string{"asset_pointer", "assetPointer"} {
 			if assetPointer, ok := item[key].(string); ok {
-				appendAssetPointerResult(client, account, results, seen, assetPointer)
+				appendAssetPointerResult(client, account, results, seen, excludedFileIDs, assetPointer)
 			}
 		}
 		for _, key := range []string{"file_id", "fileId", "id"} {
 			if fileID, ok := item[key].(string); ok && strings.HasPrefix(fileID, "file-") {
-				appendFileIDResult(client, account, results, seen, fileID)
+				appendFileIDResult(client, account, results, seen, excludedFileIDs, fileID)
 			}
 		}
 		for _, key := range []string{"download_url", "downloadUrl", "url"} {
@@ -216,11 +228,11 @@ func collectImageResultsFromValue(client httpclient.AuroraHttpClient, account *a
 			}
 		}
 		for _, nested := range item {
-			collectImageResultsFromValue(client, account, nested, results, seen)
+			collectImageResultsFromValue(client, account, nested, results, seen, excludedFileIDs)
 		}
 	case []interface{}:
 		for _, nested := range item {
-			collectImageResultsFromValue(client, account, nested, results, seen)
+			collectImageResultsFromValue(client, account, nested, results, seen, excludedFileIDs)
 		}
 	case string:
 		if b64, isDataImage := stripDataImagePrefix(item); isDataImage {
@@ -231,6 +243,10 @@ func collectImageResultsFromValue(client httpclient.AuroraHttpClient, account *a
 
 // CollectImageResults 从 SSE 响应中收集图片生成结果。
 func CollectImageResults(response *http.Response, client httpclient.AuroraHttpClient, account *accounts.Account) ([]ImageGenerationResult, string, string, error) {
+	return collectImageResults(response, client, account, nil)
+}
+
+func collectImageResults(response *http.Response, client httpclient.AuroraHttpClient, account *accounts.Account, excludedFileIDs map[string]bool) ([]ImageGenerationResult, string, string, error) {
 	reader := bufio.NewReader(response.Body)
 	var originalResponse chatgpt_types.ChatGPTResponse
 	var convID string
@@ -256,7 +272,7 @@ func CollectImageResults(response *http.Response, client httpclient.AuroraHttpCl
 		originalResponse.Message.ID = ""
 		var raw map[string]interface{}
 		if err := json.Unmarshal([]byte(line), &raw); err == nil {
-			collectImageResultsFromValue(client, account, raw, &results, seen)
+			collectImageResultsFromValue(client, account, raw, &results, seen, excludedFileIDs)
 		}
 		if err := json.Unmarshal([]byte(line), &originalResponse); err != nil {
 			continue
@@ -289,7 +305,7 @@ func CollectImageResults(response *http.Response, client httpclient.AuroraHttpCl
 			if err := json.Unmarshal(jsonItem, &dalleContent); err != nil || dalleContent.AssetPointer == "" {
 				continue
 			}
-			appendAssetPointerResult(client, account, &results, seen, dalleContent.AssetPointer)
+			appendAssetPointerResult(client, account, &results, seen, excludedFileIDs, dalleContent.AssetPointer)
 		}
 	}
 	return results, convID, strings.Join(textParts, ""), nil
@@ -319,10 +335,10 @@ func getConversation(client httpclient.AuroraHttpClient, account *accounts.Accou
 	return result, nil
 }
 
-func collectImageResultsFromConversation(client httpclient.AuroraHttpClient, account *accounts.Account, conversation map[string]interface{}) []ImageGenerationResult {
+func collectImageResultsFromConversation(client httpclient.AuroraHttpClient, account *accounts.Account, conversation map[string]interface{}, excludedFileIDs map[string]bool) []ImageGenerationResult {
 	var results []ImageGenerationResult
 	seen := make(map[string]bool)
-	collectImageResultsFromValue(client, account, conversation, &results, seen)
+	collectImageResultsFromValue(client, account, conversation, &results, seen, excludedFileIDs)
 	return results
 }
 
@@ -368,6 +384,10 @@ func PollImageResults(client httpclient.AuroraHttpClient, account *accounts.Acco
 // optionally reporting progress to streaming callers. A bounded wait gives
 // callers a useful error instead of an indefinitely stalled request.
 func PollImageResultsWithProgress(client httpclient.AuroraHttpClient, account *accounts.Account, conversationID string, initial []ImageGenerationResult, progress func(int, time.Duration)) ([]ImageGenerationResult, error) {
+	return pollImageResultsWithProgress(client, account, conversationID, initial, progress, nil)
+}
+
+func pollImageResultsWithProgress(client httpclient.AuroraHttpClient, account *accounts.Account, conversationID string, initial []ImageGenerationResult, progress func(int, time.Duration), excludedFileIDs map[string]bool) ([]ImageGenerationResult, error) {
 	if len(initial) > 0 || conversationID == "" {
 		return initial, nil
 	}
@@ -388,7 +408,7 @@ func PollImageResultsWithProgress(client httpclient.AuroraHttpClient, account *a
 		if message := findImageGenerationError(conversation); message != "" {
 			return nil, errors.New(message)
 		}
-		results := collectImageResultsFromConversation(client, account, conversation)
+		results := collectImageResultsFromConversation(client, account, conversation, excludedFileIDs)
 		if len(results) > 0 {
 			return results, nil
 		}
@@ -597,11 +617,17 @@ func generatePictureConversationImagesWithReferences(client httpclient.AuroraHtt
 		body, _ := io.ReadAll(response.Body)
 		return nil, "", fmt.Errorf("image conversation failed (status %d): %s", response.StatusCode, string(body))
 	}
-	results, conversationID, upstreamText, err := CollectImageResults(response, client, account)
+	excludedFileIDs := make(map[string]bool, len(references))
+	for _, reference := range references {
+		if reference.FileID != "" {
+			excludedFileIDs[extractFileID(reference.FileID)] = true
+		}
+	}
+	results, conversationID, upstreamText, err := collectImageResults(response, client, account, excludedFileIDs)
 	if err != nil {
 		return results, upstreamText, err
 	}
-	results, err = PollImageResultsWithProgress(client, account, conversationID, results, progress)
+	results, err = pollImageResultsWithProgress(client, account, conversationID, results, progress, excludedFileIDs)
 	if err != nil {
 		return results, upstreamText, err
 	}
