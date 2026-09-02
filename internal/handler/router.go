@@ -28,7 +28,11 @@ func RegisterRouter(accountPool *accounts.Pool, cfg *config.Config) *gin.Engine 
 	adminHandler := NewAdminHandler(accountPool, cfg)
 
 	// 初始化基础前置参数（DPL、BasicCookies 等）
-	proxyUrl := ""
+	// 用配置的代理访问 chatgpt.com,否则本机连不上 → BasicCookies 收集不到
+	proxyUrl := cfg.ProxyURL
+	if proxyUrl == "" {
+		proxyUrl = cfg.HTTPProxy
+	}
 	client := bogdanfinn.NewStdClient()
 	chatgpt.GetDpl(client, proxyUrl)
 

@@ -53,6 +53,18 @@ func setupImageClientWithProxy(proxyURL string) *bogdanfinn.TlsClient {
 	return client
 }
 
+// imageClientForAccount keeps image uploads, generation polling, and downloads
+// inside the same browser-like session that authenticated the account. This is
+// required by the web API when image work outlives the initial conversation.
+func imageClientForAccount(account *accounts.Account, proxyURL string) *bogdanfinn.TlsClient {
+	if client, ok := account.Client.(*bogdanfinn.TlsClient); ok && client != nil {
+		return client
+	}
+	client := setupImageClientWithProxy(proxyURL)
+	client.SetCookies("https://chatgpt.com", chatgpt.BasicCookies)
+	return client
+}
+
 // ─── Image stream types ──────────────────────────────────────────
 
 type imageStreamChunk struct {
@@ -302,8 +314,7 @@ func (h *ImageHandler) Generations(c *gin.Context) {
 	}
 
 	proxyUrl := account.Proxy
-	client := setupImageClientWithProxy(proxyUrl)
-	client.SetCookies("https://chatgpt.com", chatgpt.BasicCookies)
+	client := imageClientForAccount(account, proxyUrl)
 	turnStile, status, err := chatgpt.InitSentinel(client, account, proxyUrl, 0)
 	if err != nil {
 		if status == http.StatusUnauthorized {
@@ -1091,8 +1102,7 @@ func (h *ImageHandler) runImageEditFlow(c *gin.Context, asVariation bool) {
 	}
 
 	proxyUrl := account.Proxy
-	client := setupImageClientWithProxy(proxyUrl)
-	client.SetCookies("https://chatgpt.com", chatgpt.BasicCookies)
+	client := imageClientForAccount(account, proxyUrl)
 	turnStile, status, err := chatgpt.InitSentinel(client, account, proxyUrl, 0)
 	if err != nil {
 		if status == http.StatusUnauthorized {

@@ -73,6 +73,9 @@ func parseConversationEvent(line string, state *sseparser.PatchState, model stri
 	}
 
 	if response, ok := sseparser.ResponseFromValue(raw["v"]); ok {
+		if state.Response.Message.ID != "" && response.Message.ID != "" && response.Message.ID != state.Response.Message.ID {
+			sseparser.ResetMessage(state)
+		}
 		state.Response = response
 		if channel := sseparser.ChannelFromValue(raw["v"]); channel != "" {
 			state.Channel = channel
@@ -86,12 +89,10 @@ func parseConversationEvent(line string, state *sseparser.PatchState, model stri
 		return conversationStreamEvent{response: state.Response, messageID: state.Response.Message.ID, channel: state.Channel}, true
 	}
 
-	// Recent conversation streams batch patches as {"o":"patch","v":[...]}
-	// and omit the formerly-present outer `p` field. Apply each inner patch
-	// whenever it declares its own path, otherwise the initial assistant text
-	// can be skipped until a later full snapshot arrives.
-	if batch, ok := raw["v"].([]interface{}); ok {
+	// Recent streams can send a bare patch array and omit the outer path.
+	if batch, ok := raw["v"].([]interface{}); ok && raw["p"] == nil {
 		applied := false
+		sseparser.EnsurePatchDefaults(state)
 		for _, item := range batch {
 			op, ok := item.(map[string]interface{})
 			if !ok {
@@ -99,7 +100,7 @@ func parseConversationEvent(line string, state *sseparser.PatchState, model stri
 			}
 			subPath, _ := op["p"].(string)
 			subOp, _ := op["o"].(string)
-			if subPath != "" && sseparser.ApplyPatch(state, subPath, subOp, op["v"]) {
+			if sseparser.ApplyPatch(state, subPath, subOp, op["v"]) {
 				applied = true
 			}
 		}
@@ -206,6 +207,9 @@ func HandlerDetailedWithOptions(c *gin.Context, response *http.Response, client 
 	}
 	var finish_reason string
 	var previous_text typings.StringStruct
+	var citePipeline sseparser.CiteStreamPipeline
+	var visibleChunkText strings.Builder
+	usedChunkEvents := false
 	textSnapshots := make(map[string]*typings.StringStruct)
 	// ChatGPT echoes the messages supplied in a stateless OpenAI request before
 	// it streams the newly generated assistant message. Those assistant IDs are
@@ -228,6 +232,9 @@ func HandlerDetailedWithOptions(c *gin.Context, response *http.Response, client 
 	var activeChannel string
 	var assistantMessageID string
 	visibleText := func() string {
+		if usedChunkEvents {
+			return strings.Join(imgSource, "") + visibleChunkText.String()
+		}
 		return strings.Join(imgSource, "") + emittedText
 	}
 	artifactState := newArtifactAccumulator()
@@ -318,6 +325,20 @@ func HandlerDetailedWithOptions(c *gin.Context, response *http.Response, client 
 	finalizeArtifacts := func() {
 		emitSentinels(materializeArtifactEvents(client, account, convId, artifactState.Finalize(), artifactConfig))
 	}
+	flushCites := func() {
+		flushed := citePipeline.Flush(patchState.CiteAlts)
+		if flushed == "" {
+			return
+		}
+		if writeStream {
+			chunk := official_types.NewChatCompletionChunk(flushed, model)
+			chunk.ConversationID = convId
+			_ = writeChatCompletionChunk(c, chunk)
+		}
+		if usedChunkEvents {
+			visibleChunkText.WriteString(flushed)
+		}
+	}
 readLoop:
 	for {
 		line, err := reader.ReadString('\n')
@@ -356,6 +377,7 @@ readLoop:
 						continue readLoop
 					}
 				}
+				flushCites()
 				if err := flushDeferredHTTPOutput(); err != nil {
 					return HandlerResult{}
 				}
@@ -389,6 +411,7 @@ readLoop:
 				continue
 			}
 			if streamEvent.chunk != nil {
+				usedChunkEvents = true
 				if streamEvent.conversationID != "" {
 					convId = streamEvent.conversationID
 				}
@@ -397,6 +420,7 @@ readLoop:
 				}
 				rawDeltaText := sseparser.NormalizeContentDelta(previous_text.Text, streamEvent.text)
 				deltaText := chatgpt.SanitizedContentDelta(previous_text.Text, rawDeltaText)
+				deltaText = citePipeline.Feed(patchState.CiteAlts, deltaText)
 				if streamEvent.channel != "" {
 					activeChannel = streamEvent.channel
 				}
@@ -496,8 +520,10 @@ readLoop:
 				}
 				if deltaText != "" {
 					emittedText += deltaText
+					visibleChunkText.WriteString(deltaText)
 				}
 				if streamEvent.isStop {
+					flushCites()
 					if max_tokens && convId != "" && assistantMessageID != "" {
 						finalizeArtifacts()
 						return HandlerResult{
@@ -682,6 +708,7 @@ readLoop:
 			}
 
 			if isEnd {
+				flushCites()
 				if shouldDeferHTTPOutput() {
 					// Keep reading through [DONE] so the complete WebSocket handoff
 					// can replace this partial HTTP response.
@@ -727,6 +754,7 @@ readLoop:
 			currentEvent = ""
 		}
 		if err == io.EOF {
+			flushCites()
 			if flushErr := flushDeferredHTTPOutput(); flushErr != nil {
 				return HandlerResult{}
 			}

@@ -10,7 +10,16 @@ import (
 
 func ConvertToString(chatgpt_response *chatgpt_types.ChatGPTResponse, previous_text *typings.StringStruct, role bool, model string) string {
 	currentText := TextFromParts(chatgpt_response.Message.Content.Parts)
-	deltaText := SanitizedSnapshotDelta(previous_text.Text, currentText)
+	var deltaText string
+	if previous_text.Text == "" {
+		deltaText = currentText
+	} else if strings.HasPrefix(currentText, previous_text.Text) {
+		deltaText = currentText[len(previous_text.Text):]
+	} else {
+		// A non-cumulative snapshot must be emitted whole; trimming a substring
+		// from its middle can silently lose the beginning of an answer.
+		deltaText = currentText
+	}
 	previous_text.Text = currentText
 	translated_response := official_types.NewChatCompletionChunk(deltaText, model)
 	if role {
