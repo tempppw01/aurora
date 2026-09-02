@@ -97,3 +97,46 @@ func TestCollectImageResultsFromConversationExcludesInputReferences(t *testing.T
 		t.Fatalf("results = %#v, want only the generated image", results)
 	}
 }
+
+func TestCollectImageResultsFromConversationIgnoresUserImageURLs(t *testing.T) {
+	conversation := map[string]interface{}{
+		"mapping": map[string]interface{}{
+			"input": map[string]interface{}{
+				"message": map[string]interface{}{
+					"author": map[string]interface{}{"role": "user"},
+					"content": map[string]interface{}{
+						"content_type": "multimodal_text",
+						"parts":        []interface{}{map[string]interface{}{"url": "https://example.test/input.png"}},
+					},
+				},
+			},
+			"output": map[string]interface{}{
+				"message": map[string]interface{}{
+					"author": map[string]interface{}{"role": "assistant"},
+					"content": map[string]interface{}{
+						"content_type": "multimodal_text",
+						"parts":        []interface{}{map[string]interface{}{"url": "https://example.test/generated.png"}},
+					},
+				},
+			},
+		},
+	}
+
+	results := collectImageResultsFromConversation(nil, nil, conversation, nil)
+	if len(results) != 1 || results[0].URL != "https://example.test/generated.png" {
+		t.Fatalf("results = %#v, want only the assistant-generated image", results)
+	}
+}
+
+func TestIsRetryableImageDownloadStatus(t *testing.T) {
+	for _, status := range []int{0, 408, 425, 429, 500, 504} {
+		if !isRetryableImageDownloadStatus(status) {
+			t.Errorf("status %d should be retryable", status)
+		}
+	}
+	for _, status := range []int{400, 401, 403, 404, 422} {
+		if isRetryableImageDownloadStatus(status) {
+			t.Errorf("status %d should not be retryable", status)
+		}
+	}
+}

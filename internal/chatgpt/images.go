@@ -28,8 +28,10 @@ type ImageGenerationResult struct {
 var ErrImageGenerationTimeout = errors.New("image generation timed out while waiting for ChatGPT")
 
 const (
-	imagePollAttempts = 45
-	imagePollInterval = 2 * time.Second
+	imagePollAttempts          = 45
+	imagePollInterval          = 2 * time.Second
+	imageDownloadMaxAttempts   = 3
+	imageDownloadRetryInterval = 500 * time.Millisecond
 )
 
 // ImageEditReference 表示已上传到 ChatGPT 文件服务的一张源图。
@@ -110,6 +112,22 @@ func GetImageDownloadURL(client httpclient.AuroraHttpClient, url string, account
 
 // DownloadImageBytes 从 URL 下载图片的字节数据。
 func DownloadImageBytes(client httpclient.AuroraHttpClient, url string, account *accounts.Account) ([]byte, error) {
+	var lastErr error
+	for attempt := 1; attempt <= imageDownloadMaxAttempts; attempt++ {
+		data, status, err := downloadImageBytesOnce(client, url, account)
+		if err == nil {
+			return data, nil
+		}
+		lastErr = err
+		if !isRetryableImageDownloadStatus(status) || attempt == imageDownloadMaxAttempts {
+			break
+		}
+		time.Sleep(time.Duration(attempt) * imageDownloadRetryInterval)
+	}
+	return nil, lastErr
+}
+
+func downloadImageBytesOnce(client httpclient.AuroraHttpClient, url string, account *accounts.Account) ([]byte, int, error) {
 	header := make(httpclient.AuroraHeaders)
 	if account != nil && account.PUID != "" {
 		header.Set("Cookie", "_puid="+account.PUID+";")
@@ -122,17 +140,21 @@ func DownloadImageBytes(client httpclient.AuroraHttpClient, url string, account 
 	setTeamAccountHeader(header, account)
 	response, err := client.Request(http.MethodGet, url, header, nil, nil)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer response.Body.Close()
 	body, err := io.ReadAll(response.Body)
 	if err != nil {
-		return nil, err
+		return nil, response.StatusCode, err
 	}
 	if response.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("image download failed: %s", string(body))
+		return nil, response.StatusCode, fmt.Errorf("image download failed (status %d): %s", response.StatusCode, string(body))
 	}
-	return body, nil
+	return body, response.StatusCode, nil
+}
+
+func isRetryableImageDownloadStatus(status int) bool {
+	return status == 0 || status == http.StatusRequestTimeout || status == http.StatusTooEarly || status == http.StatusTooManyRequests || status >= http.StatusInternalServerError
 }
 
 func addImageResult(results *[]ImageGenerationResult, seen map[string]bool, result ImageGenerationResult) {
@@ -205,38 +227,55 @@ func appendFileIDResult(client httpclient.AuroraHttpClient, account *accounts.Ac
 }
 
 func collectImageResultsFromValue(client httpclient.AuroraHttpClient, account *accounts.Account, value interface{}, results *[]ImageGenerationResult, seen map[string]bool, excludedFileIDs map[string]bool) {
+	collectImageResultsFromValueWithRole(client, account, value, results, seen, excludedFileIDs, "")
+}
+
+func collectImageResultsFromValueWithRole(client httpclient.AuroraHttpClient, account *accounts.Account, value interface{}, results *[]ImageGenerationResult, seen map[string]bool, excludedFileIDs map[string]bool, role string) {
 	switch item := value.(type) {
 	case map[string]interface{}:
+		nextRole := role
+		if author, ok := item["author"].(map[string]interface{}); ok {
+			if messageRole, ok := author["role"].(string); ok {
+				nextRole = strings.ToLower(strings.TrimSpace(messageRole))
+			}
+		}
+		producer := nextRole == "assistant" || nextRole == "tool"
 		if result, ok := item["result"].(string); ok && result != "" {
-			if b64, isDataImage := stripDataImagePrefix(result); isDataImage {
-				addImageResult(results, seen, ImageGenerationResult{B64JSON: b64})
+			if producer {
+				if b64, isDataImage := stripDataImagePrefix(result); isDataImage {
+					addImageResult(results, seen, ImageGenerationResult{B64JSON: b64})
+				}
 			}
 		}
-		for _, key := range []string{"asset_pointer", "assetPointer"} {
-			if assetPointer, ok := item[key].(string); ok {
-				appendAssetPointerResult(client, account, results, seen, excludedFileIDs, assetPointer)
+		if producer {
+			for _, key := range []string{"asset_pointer", "assetPointer"} {
+				if assetPointer, ok := item[key].(string); ok {
+					appendAssetPointerResult(client, account, results, seen, excludedFileIDs, assetPointer)
+				}
 			}
-		}
-		for _, key := range []string{"file_id", "fileId", "id"} {
-			if fileID, ok := item[key].(string); ok && strings.HasPrefix(fileID, "file-") {
-				appendFileIDResult(client, account, results, seen, excludedFileIDs, fileID)
+			for _, key := range []string{"file_id", "fileId", "id"} {
+				if fileID, ok := item[key].(string); ok && strings.HasPrefix(fileID, "file-") {
+					appendFileIDResult(client, account, results, seen, excludedFileIDs, fileID)
+				}
 			}
-		}
-		for _, key := range []string{"download_url", "downloadUrl", "url"} {
-			if rawURL, ok := item[key].(string); ok && strings.HasPrefix(rawURL, "http") {
-				addImageResult(results, seen, ImageGenerationResult{URL: rawURL})
+			for _, key := range []string{"download_url", "downloadUrl", "url"} {
+				if rawURL, ok := item[key].(string); ok && strings.HasPrefix(rawURL, "http") {
+					addImageResult(results, seen, ImageGenerationResult{URL: rawURL})
+				}
 			}
 		}
 		for _, nested := range item {
-			collectImageResultsFromValue(client, account, nested, results, seen, excludedFileIDs)
+			collectImageResultsFromValueWithRole(client, account, nested, results, seen, excludedFileIDs, nextRole)
 		}
 	case []interface{}:
 		for _, nested := range item {
-			collectImageResultsFromValue(client, account, nested, results, seen, excludedFileIDs)
+			collectImageResultsFromValueWithRole(client, account, nested, results, seen, excludedFileIDs, role)
 		}
 	case string:
-		if b64, isDataImage := stripDataImagePrefix(item); isDataImage {
-			addImageResult(results, seen, ImageGenerationResult{B64JSON: b64})
+		if (role == "assistant" || role == "tool") && strings.HasPrefix(item, "data:image/") {
+			if b64, isDataImage := stripDataImagePrefix(item); isDataImage {
+				addImageResult(results, seen, ImageGenerationResult{B64JSON: b64})
+			}
 		}
 	}
 }
