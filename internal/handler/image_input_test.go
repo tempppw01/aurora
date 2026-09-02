@@ -26,6 +26,9 @@ func TestImageEditDecodeBase64(t *testing.T) {
 }
 
 func TestValidateImageEditSources(t *testing.T) {
+	if err := validateImageEditSources(make([]editImageInput, maxImageEditSources)); err != nil {
+		t.Fatalf("validateImageEditSources rejected %d images: %v", maxImageEditSources, err)
+	}
 	tooMany := make([]editImageInput, maxImageEditSources+1)
 	if err := validateImageEditSources(tooMany); err == nil {
 		t.Fatal("validateImageEditSources accepted too many images")

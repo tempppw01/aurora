@@ -36,7 +36,7 @@ type ImageHandler struct {
 
 const (
 	imageUpstreamRequestTimeoutSeconds       = 90
-	maxImageEditSources                      = 4
+	maxImageEditSources                      = 16
 	maxImageEditTotalBytes             int64 = 40 << 20
 	imageUploadMaxAttempts                   = 3
 )
