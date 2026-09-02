@@ -1,6 +1,8 @@
 package imageflow
 
 import (
+	"bytes"
+	"encoding/base64"
 	"net"
 	"testing"
 )
@@ -15,6 +17,23 @@ func TestValidateRemoteImageURLRejectsPrivateAddresses(t *testing.T) {
 		if _, err := validateRemoteImageURL(raw); err == nil {
 			t.Errorf("validateRemoteImageURL(%q) unexpectedly succeeded", raw)
 		}
+	}
+}
+
+func TestDecodeBase64Image(t *testing.T) {
+	pngData := []byte("\x89PNG\r\n\x1a\n")
+	source, err := DecodeBase64Image(base64.RawStdEncoding.EncodeToString(pngData))
+	if err != nil {
+		t.Fatalf("DecodeBase64Image returned error: %v", err)
+	}
+	if source.ContentType != "image/png" || source.Filename != "image.png" || !bytes.Equal(source.Data, pngData) {
+		t.Fatalf("source = %#v, want decoded PNG", source)
+	}
+}
+
+func TestDecodeBase64ImageRejectsInvalidData(t *testing.T) {
+	if _, err := DecodeBase64Image("not base64"); err == nil {
+		t.Fatal("DecodeBase64Image unexpectedly accepted invalid data")
 	}
 }
 

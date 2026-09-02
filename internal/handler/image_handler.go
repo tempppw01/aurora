@@ -34,7 +34,12 @@ type ImageHandler struct {
 	cfg         *config.Config
 }
 
-const imageUpstreamRequestTimeoutSeconds = 90
+const (
+	imageUpstreamRequestTimeoutSeconds       = 90
+	maxImageEditSources                      = 4
+	maxImageEditTotalBytes             int64 = 40 << 20
+	imageUploadMaxAttempts                   = 3
+)
 
 func NewImageHandler(pool *accounts.Pool, cfg *config.Config) *ImageHandler {
 	return &ImageHandler{accountPool: pool, cfg: cfg}
@@ -586,6 +591,14 @@ func imageEditReadJSONImage(data []byte, filename, contentType string) (editImag
 	return editImageInput{Data: data, Filename: filename, ContentType: contentType}, nil
 }
 
+func imageEditDecodeBase64(value string) (editImageInput, error) {
+	source, err := imageflow.DecodeBase64Image(value)
+	if err != nil {
+		return editImageInput{}, err
+	}
+	return editImageInput{Data: source.Data, Filename: source.Filename, ContentType: source.ContentType}, nil
+}
+
 func imageEditConvertURL(client httpclient.AuroraHttpClient, raw string) (editImageInput, bool, error) {
 	item, ok, err := imageflow.NormalizeImageURL(client, raw)
 	if err != nil || !ok {
@@ -624,13 +637,13 @@ func resolveEditImageSources(c *gin.Context, body map[string]interface{}, client
 					out = append(out, item)
 				}
 			} else if b64, ok := t["b64_json"].(string); ok && b64 != "" {
-				item, err := imageEditReadJSONImage([]byte(b64), "image.png", "image/png")
+				item, err := imageEditDecodeBase64(b64)
 				if err != nil {
 					return err
 				}
 				out = append(out, item)
 			} else if b64, ok := t["base64"].(string); ok && b64 != "" {
-				item, err := imageEditReadJSONImage([]byte(b64), "image.png", "image/png")
+				item, err := imageEditDecodeBase64(b64)
 				if err != nil {
 					return err
 				}
@@ -782,18 +795,18 @@ func (h *ImageHandler) runImageEditFlow(c *gin.Context, asVariation bool) {
 
 	if contentType == "application/json" {
 		var body struct {
-			Prompt         string                          `json:"prompt"`
-			Model          string                          `json:"model"`
-			N              int                             `json:"n"`
-			Size           string                          `json:"size"`
-			ResponseFormat string                          `json:"response_format"`
-			Stream         bool                            `json:"stream"`
-			Images         []officialtypes.ImageEditSource `json:"images,omitempty"`
-			Image          *officialtypes.ImageEditSource  `json:"image,omitempty"`
-			ImageURL       interface{}                     `json:"image_url,omitempty"`
-			Input          interface{}                     `json:"input,omitempty"`
-			Content        interface{}                     `json:"content,omitempty"`
-			Messages       interface{}                     `json:"messages,omitempty"`
+			Prompt         string                   `json:"prompt"`
+			Model          string                   `json:"model"`
+			N              int                      `json:"n"`
+			Size           string                   `json:"size"`
+			ResponseFormat string                   `json:"response_format"`
+			Stream         bool                     `json:"stream"`
+			Images         []map[string]interface{} `json:"images,omitempty"`
+			Image          map[string]interface{}   `json:"image,omitempty"`
+			ImageURL       interface{}              `json:"image_url,omitempty"`
+			Input          interface{}              `json:"input,omitempty"`
+			Content        interface{}              `json:"content,omitempty"`
+			Messages       interface{}              `json:"messages,omitempty"`
 		}
 		if err := c.BindJSON(&body); err != nil {
 			c.JSON(400, gin.H{"error": gin.H{
@@ -813,25 +826,43 @@ func (h *ImageHandler) runImageEditFlow(c *gin.Context, asVariation bool) {
 
 		client := bogdanfinn.NewStdClient()
 
-		for _, src := range body.Images {
-			item, _, err := imageEditConvertURL(client, src.ImageURL)
+		appendJSONSource := func(src map[string]interface{}) error {
+			var item editImageInput
+			var err error
+			switch {
+			case stringFromAny(src["image_url"]) != "":
+				item, _, err = imageEditConvertURL(client, stringFromAny(src["image_url"]))
+			case stringFromAny(src["url"]) != "":
+				item, _, err = imageEditConvertURL(client, stringFromAny(src["url"]))
+			case stringFromAny(src["b64_json"]) != "":
+				item, err = imageEditDecodeBase64(stringFromAny(src["b64_json"]))
+			case stringFromAny(src["base64"]) != "":
+				item, err = imageEditDecodeBase64(stringFromAny(src["base64"]))
+			default:
+				return fmt.Errorf("missing image_url, b64_json, or base64")
+			}
 			if err != nil {
-				c.JSON(400, gin.H{"error": gin.H{
-					"message": "invalid image reference: " + err.Error(),
-					"type":    "invalid_request_error",
-					"param":   "images",
-					"code":    "invalid_image",
-				}})
-				return
+				return err
 			}
 			if len(item.Data) > 0 {
 				imageSources = append(imageSources, item)
 			}
+			return nil
+		}
+		for index, src := range body.Images {
+			if err := appendJSONSource(src); err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{
+					"message": "invalid image reference: " + err.Error(),
+					"type":    "invalid_request_error",
+					"param":   fmt.Sprintf("images[%d]", index),
+					"code":    "invalid_image",
+				}})
+				return
+			}
 		}
 		if body.Image != nil {
-			item, _, err := imageEditConvertURL(client, body.Image.ImageURL)
-			if err != nil {
-				c.JSON(400, gin.H{"error": gin.H{
+			if err := appendJSONSource(body.Image); err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{
 					"message": "invalid image reference: " + err.Error(),
 					"type":    "invalid_request_error",
 					"param":   "image",
@@ -839,24 +870,37 @@ func (h *ImageHandler) runImageEditFlow(c *gin.Context, asVariation bool) {
 				}})
 				return
 			}
-			if len(item.Data) > 0 {
-				imageSources = append(imageSources, item)
-			}
 		}
 		if body.ImageURL != nil {
-			switch t := body.ImageURL.(type) {
-			case string:
-				item, _, err := imageEditConvertURL(client, t)
-				if err == nil && len(item.Data) > 0 {
-					imageSources = append(imageSources, item)
-				}
-			case map[string]interface{}:
-				if u, ok := t["url"].(string); ok {
-					item, _, err := imageEditConvertURL(client, u)
-					if err == nil && len(item.Data) > 0 {
+			var appendImageURLValue func(interface{}) error
+			appendImageURLValue = func(value interface{}) error {
+				switch t := value.(type) {
+				case string:
+					item, _, err := imageEditConvertURL(client, t)
+					if err != nil {
+						return err
+					}
+					if len(item.Data) > 0 {
 						imageSources = append(imageSources, item)
 					}
+				case map[string]interface{}:
+					if err := appendJSONSource(t); err != nil {
+						return err
+					}
+				case []interface{}:
+					for _, item := range t {
+						if err := appendImageURLValue(item); err != nil {
+							return err
+						}
+					}
+				default:
+					return fmt.Errorf("image_url must be a string, object, or array")
 				}
+				return nil
+			}
+			if err := appendImageURLValue(body.ImageURL); err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": "invalid image reference: " + err.Error(), "type": "invalid_request_error", "param": "image_url", "code": "invalid_image"}})
+				return
 			}
 		}
 
@@ -920,9 +964,18 @@ func (h *ImageHandler) runImageEditFlow(c *gin.Context, asVariation bool) {
 		}
 		if vs, ok := form.Value["image_url"]; ok {
 			client := bogdanfinn.NewStdClient()
-			for _, s := range vs {
+			for index, s := range vs {
 				item, _, err := imageEditConvertURL(client, s)
-				if err == nil && len(item.Data) > 0 {
+				if err != nil {
+					c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{
+						"message": "invalid image reference: " + err.Error(),
+						"type":    "invalid_request_error",
+						"param":   fmt.Sprintf("image_url[%d]", index),
+						"code":    "invalid_image",
+					}})
+					return
+				}
+				if len(item.Data) > 0 {
 					imageSources = append(imageSources, item)
 				}
 			}
@@ -942,6 +995,15 @@ func (h *ImageHandler) runImageEditFlow(c *gin.Context, asVariation bool) {
 			"type":    "invalid_request_error",
 			"param":   "image",
 			"code":    "missing_required_parameter",
+		}})
+		return
+	}
+	if err := validateImageEditSources(imageSources); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{
+			"message": err.Error(),
+			"type":    "invalid_request_error",
+			"param":   "images",
+			"code":    "invalid_image",
 		}})
 		return
 	}
@@ -966,6 +1028,15 @@ func (h *ImageHandler) runImageEditFlow(c *gin.Context, asVariation bool) {
 			return
 		}
 		imageSources[i] = normalized
+	}
+	if err := validateImageEditSources(imageSources); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{
+			"message": err.Error(),
+			"type":    "invalid_request_error",
+			"param":   "images",
+			"code":    "invalid_image",
+		}})
+		return
 	}
 	upstreamPrompt, err := imagePromptWithPreferences(prompt, size, "")
 	if err != nil {
@@ -1043,19 +1114,20 @@ func (h *ImageHandler) runImageEditFlow(c *gin.Context, asVariation bool) {
 	// 1) 上传所有源图
 	references := make([]chatgpt.ImageEditReference, 0, len(imageSources))
 	for idx, src := range imageSources {
-		uploaded, upStatus, upErr := chatgpt.UploadFile(client, account, proxyUrl, src.Filename, src.ContentType, src.Data)
+		uploaded, upStatus, upErr := uploadImageWithRetry(client, account, proxyUrl, src.Filename, src.ContentType, src.Data)
 		if upErr != nil {
+			message := fmt.Sprintf("upload image %d/%d failed: %s", idx+1, len(imageSources), upErr.Error())
 			if stream {
 				writeImageStreamEvent(c, "image.generation.error", gin.H{
 					"object":  "image.generation.error",
 					"index":   idx,
-					"message": "upload image failed: " + upErr.Error(),
+					"message": message,
 				})
 				writeImageStreamDone(c)
 				return
 			}
 			c.JSON(upStatus, gin.H{"error": gin.H{
-				"message": "upload image failed: " + upErr.Error(),
+				"message": message,
 				"type":    "image_upload_error",
 				"param":   fmt.Sprintf("image[%d]", idx),
 				"code":    "image_upload_error",
@@ -1221,4 +1293,36 @@ func (h *ImageHandler) runImageEditFlow(c *gin.Context, asVariation bool) {
 	} else {
 		c.JSON(200, officialtypes.NewImageEditResponse(data))
 	}
+}
+
+func validateImageEditSources(sources []editImageInput) error {
+	if len(sources) > maxImageEditSources {
+		return fmt.Errorf("a maximum of %d source images is supported per request", maxImageEditSources)
+	}
+	var totalBytes int64
+	for _, source := range sources {
+		totalBytes += int64(len(source.Data))
+		if totalBytes > maxImageEditTotalBytes {
+			return fmt.Errorf("combined image size exceeds the %d MiB limit", maxImageEditTotalBytes>>20)
+		}
+	}
+	return nil
+}
+
+func uploadImageWithRetry(client httpclient.AuroraHttpClient, account *accounts.Account, proxyURL, filename, contentType string, data []byte) (chatgpt.UploadedFile, int, error) {
+	var uploaded chatgpt.UploadedFile
+	var status int
+	var err error
+	for attempt := 1; attempt <= imageUploadMaxAttempts; attempt++ {
+		uploaded, status, err = chatgpt.UploadFile(client, account, proxyURL, filename, contentType, data)
+		if err == nil || !isRetryableImageUploadStatus(status) || attempt == imageUploadMaxAttempts {
+			return uploaded, status, err
+		}
+		time.Sleep(time.Duration(attempt) * 500 * time.Millisecond)
+	}
+	return uploaded, status, err
+}
+
+func isRetryableImageUploadStatus(status int) bool {
+	return status == http.StatusTooManyRequests || status >= http.StatusInternalServerError
 }

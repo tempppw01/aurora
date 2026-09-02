@@ -45,3 +45,25 @@ func TestBuildImageEditMessageContentIncludesCompleteAttachmentMetadata(t *testi
 		t.Fatal("metadata is missing selected_sources")
 	}
 }
+
+func TestBuildImageEditMessageContentKeepsAllReferencesInOrder(t *testing.T) {
+	content, metadata := buildImageEditMessageContent([]ImageEditReference{
+		{FileID: "file-first", Filename: "first.png", MimeType: "image/png"},
+		{FileID: "file-second", Filename: "second.jpg", MimeType: "image/jpeg"},
+	}, "combine both")
+
+	parts := content["parts"].([]interface{})
+	if len(parts) != 3 {
+		t.Fatalf("parts length = %d, want 3", len(parts))
+	}
+	for index, want := range []string{"file-service://file-first", "file-service://file-second"} {
+		part := parts[index].(map[string]interface{})
+		if part["asset_pointer"] != want {
+			t.Errorf("parts[%d].asset_pointer = %#v, want %q", index, part["asset_pointer"], want)
+		}
+	}
+	attachments := metadata["attachments"].([]map[string]interface{})
+	if len(attachments) != 2 || attachments[0]["id"] != "file-first" || attachments[1]["id"] != "file-second" {
+		t.Fatalf("attachments = %#v, want both references in order", attachments)
+	}
+}

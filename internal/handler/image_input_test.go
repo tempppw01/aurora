@@ -14,6 +14,41 @@ import (
 	"aurora/internal/chatgpt"
 )
 
+func TestImageEditDecodeBase64(t *testing.T) {
+	raw := []byte("\x89PNG\r\n\x1a\n")
+	input, err := imageEditDecodeBase64(base64.StdEncoding.EncodeToString(raw))
+	if err != nil {
+		t.Fatalf("imageEditDecodeBase64 returned error: %v", err)
+	}
+	if input.ContentType != "image/png" || !bytes.Equal(input.Data, raw) {
+		t.Fatalf("input = %#v, want decoded PNG", input)
+	}
+}
+
+func TestValidateImageEditSources(t *testing.T) {
+	tooMany := make([]editImageInput, maxImageEditSources+1)
+	if err := validateImageEditSources(tooMany); err == nil {
+		t.Fatal("validateImageEditSources accepted too many images")
+	}
+	tooLarge := []editImageInput{{Data: make([]byte, maxImageEditTotalBytes+1)}}
+	if err := validateImageEditSources(tooLarge); err == nil {
+		t.Fatal("validateImageEditSources accepted oversized aggregate")
+	}
+}
+
+func TestIsRetryableImageUploadStatus(t *testing.T) {
+	for _, status := range []int{http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusBadGateway} {
+		if !isRetryableImageUploadStatus(status) {
+			t.Errorf("status %d should be retryable", status)
+		}
+	}
+	for _, status := range []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusUnprocessableEntity} {
+		if isRetryableImageUploadStatus(status) {
+			t.Errorf("status %d should not be retryable", status)
+		}
+	}
+}
+
 func TestNormalizeEditImageForUploadKeepsPNG(t *testing.T) {
 	img := image.NewRGBA(image.Rect(0, 0, 2, 1))
 	img.Set(0, 0, color.RGBA{R: 255, A: 255})

@@ -132,6 +132,61 @@ func NormalizeImageURL(client httpclient.AuroraHttpClient, raw string) (ImageSou
 	return ImageSource{Data: []byte(raw), Filename: "image.png", ContentType: "image/png"}, true, nil
 }
 
+// DecodeBase64Image decodes an OpenAI-style b64_json/base64 image value into
+// uploadable image bytes. JSON image fields carry encoded bytes, not the image
+// bytes themselves, so passing the original string to file upload creates an
+// invalid image attachment upstream.
+func DecodeBase64Image(value string) (ImageSource, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ImageSource{}, fmt.Errorf("image data is empty")
+	}
+	if strings.HasPrefix(value, "data:") {
+		source, ok, err := decodeDataURL(value)
+		if err != nil {
+			return ImageSource{}, fmt.Errorf("decode base64 image: %w", err)
+		}
+		if !ok || len(source.Data) == 0 {
+			return ImageSource{}, fmt.Errorf("image data is empty")
+		}
+		return source, nil
+	}
+
+	value = strings.Join(strings.Fields(value), "")
+	var data []byte
+	var err error
+	for _, encoding := range []*base64.Encoding{
+		base64.StdEncoding,
+		base64.RawStdEncoding,
+		base64.URLEncoding,
+		base64.RawURLEncoding,
+	} {
+		data, err = encoding.DecodeString(value)
+		if err == nil {
+			break
+		}
+	}
+	if err != nil {
+		return ImageSource{}, fmt.Errorf("invalid base64 image data")
+	}
+	if len(data) == 0 {
+		return ImageSource{}, fmt.Errorf("image data is empty")
+	}
+	if int64(len(data)) > MaxImageBytes {
+		return ImageSource{}, fmt.Errorf("image exceeds the %d MiB limit", MaxImageBytes>>20)
+	}
+
+	contentType := http.DetectContentType(data)
+	if !strings.HasPrefix(contentType, "image/") {
+		return ImageSource{}, fmt.Errorf("base64 data is not a recognized image")
+	}
+	return ImageSource{
+		Data:        data,
+		Filename:    "image." + imageExtension(contentType),
+		ContentType: contentType,
+	}, nil
+}
+
 func decodeDataURL(url string) (ImageSource, bool, error) {
 	comma := strings.Index(url, ",")
 	if comma < 0 {
@@ -159,16 +214,20 @@ func decodeDataURL(url string) (ImageSource, bool, error) {
 	if int64(len(raw)) > MaxImageBytes {
 		return ImageSource{}, false, fmt.Errorf("image exceeds the %d MiB limit", MaxImageBytes>>20)
 	}
-	ext := "png"
-	switch strings.ToLower(contentType) {
+	return ImageSource{Data: raw, Filename: "image_url." + imageExtension(contentType), ContentType: contentType}, true, nil
+}
+
+func imageExtension(contentType string) string {
+	switch strings.ToLower(strings.TrimSpace(strings.Split(contentType, ";")[0])) {
 	case "image/jpeg":
-		ext = "jpg"
+		return "jpg"
 	case "image/gif":
-		ext = "gif"
+		return "gif"
 	case "image/webp":
-		ext = "webp"
+		return "webp"
+	default:
+		return "png"
 	}
-	return ImageSource{Data: raw, Filename: "image_url." + ext, ContentType: contentType}, true, nil
 }
 
 func downloadHTTPURL(client httpclient.AuroraHttpClient, rawURL string) (ImageSource, bool, error) {
@@ -329,9 +388,17 @@ func ResolveJSONImageSources(body map[string]interface{}, client httpclient.Auro
 					out = append(out, item)
 				}
 			} else if b64, ok := t["b64_json"].(string); ok && b64 != "" {
-				out = append(out, ImageSource{Data: []byte(b64), Filename: "image.png", ContentType: "image/png"})
+				item, err := DecodeBase64Image(b64)
+				if err != nil {
+					return err
+				}
+				out = append(out, item)
 			} else if b64, ok := t["base64"].(string); ok && b64 != "" {
-				out = append(out, ImageSource{Data: []byte(b64), Filename: "image.png", ContentType: "image/png"})
+				item, err := DecodeBase64Image(b64)
+				if err != nil {
+					return err
+				}
+				out = append(out, item)
 			}
 		}
 		return nil
