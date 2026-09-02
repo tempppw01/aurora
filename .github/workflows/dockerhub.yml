@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - dev
     paths-ignore:
       - README.md
   workflow_dispatch:
@@ -33,6 +34,28 @@ jobs:
           version="$(tr -d '[:space:]' < VERSION)"
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
 
+      - name: Set image tags
+        id: tags
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF_NAME}" == "main" ]]; then
+            {
+              echo 'tags<<EOF'
+              echo "${DOCKERHUB_REPOSITORY}:latest"
+              echo "${DOCKERHUB_REPOSITORY}:${{ steps.version.outputs.version }}"
+              echo "${DOCKERHUB_REPOSITORY}:sha-${GITHUB_SHA}"
+              echo 'EOF'
+            } >> "${GITHUB_OUTPUT}"
+          else
+            {
+              echo 'tags<<EOF'
+              echo "${DOCKERHUB_REPOSITORY}:dev"
+              echo "${DOCKERHUB_REPOSITORY}:dev-${{ steps.version.outputs.version }}"
+              echo "${DOCKERHUB_REPOSITORY}:dev-sha-${GITHUB_SHA}"
+              echo 'EOF'
+            } >> "${GITHUB_OUTPUT}"
+          fi
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
@@ -53,9 +76,6 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           provenance: false
-          tags: |
-            ${{ env.DOCKERHUB_REPOSITORY }}:latest
-            ${{ env.DOCKERHUB_REPOSITORY }}:${{ steps.version.outputs.version }}
-            ${{ env.DOCKERHUB_REPOSITORY }}:sha-${{ github.sha }}
+          tags: ${{ steps.tags.outputs.tags }}
           cache-from: type=gha,scope=dockerhub-${{ github.ref_name }}
           cache-to: type=gha,mode=max,scope=dockerhub-${{ github.ref_name }}
