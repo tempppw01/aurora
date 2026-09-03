@@ -4,6 +4,8 @@ tools/authenticator/proxies.txt
 tools/authenticator/authenticated_accounts.txt
 tools/authenticator/access_tokens.txt
 *.txt
+*.log
+/cmd/_probe/
 aurora
 tools/authenticator/.proxies.txt.swp
 .env

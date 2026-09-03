@@ -396,6 +396,9 @@ func ApplyPatch(state *PatchState, patchPath string, operation string, value int
 		}
 	}
 	EnsurePatchDefaults(state)
+	if strings.HasPrefix(patchPath, "/message/metadata/content_references") {
+		return applyContentReferencePatch(state, patchPath, operation, value)
+	}
 	switch {
 	case patchPath == "/conversation_id":
 		if text, ok := value.(string); ok {
@@ -472,12 +475,6 @@ func ApplyPatch(state *PatchState, patchPath string, operation string, value int
 	case patchPath == "/message/end_turn":
 		state.Response.Message.EndTurn = value
 	default:
-		// 新版 SSE (2026-08): /message/metadata/content_references[/N][/field]
-		// 携带 cite 标记的引用数据。我们只关心 matched_text(标记) 和 alt(替换链接),
-		// 其余字段(safe_urls/type/items 等)忽略。
-		if strings.HasPrefix(patchPath, "/message/metadata/content_references") {
-			return applyContentReferencePatch(state, patchPath, operation, value)
-		}
 		return false
 	}
 	return true

@@ -172,16 +172,19 @@ func TestConvertAPIRequestHandlesToolResult(t *testing.T) {
 		},
 	}
 	out := testConvert(t, req)
-	// 找到 tool 消息
 	var toolMsg string
 	for _, m := range out.Messages {
-		if m.Author.Role == "tool" {
-			text, _ := m.Content.Parts[0].(string)
+		if m.Author.Role != "user" || len(m.Content.Parts) == 0 {
+			continue
+		}
+		text, _ := m.Content.Parts[0].(string)
+		if strings.HasPrefix(text, "[tool result of bash]:") {
 			toolMsg = text
+			break
 		}
 	}
-	if !strings.Contains(toolMsg, "Resultado da ferramenta bash") {
-		t.Fatalf("tool message missing  prefix: %q", toolMsg)
+	if toolMsg == "" {
+		t.Fatalf("converted tool result message not found: %#v", out.Messages)
 	}
 	if !strings.Contains(toolMsg, "file1.py") {
 		t.Fatalf("tool message missing content: %q", toolMsg)

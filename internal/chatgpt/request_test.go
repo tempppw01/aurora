@@ -461,6 +461,110 @@ func TestHandlerStreamsShortDeltaEncoding(t *testing.T) {
 	}
 }
 
+func TestHandlerSkipsPreambleBeforeFinalMessage(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	body := strings.Join([]string{
+		`data: {"v":{"message":{"id":"preamble","author":{"role":"assistant"},"content":{"content_type":"text","parts":["先确认一下"]},"end_turn":false,"metadata":{"is_thinking_preamble_message":true,"message_type":"next"},"recipient":"all","channel":"commentary"},"conversation_id":"conv-1"}}`,
+		`data: {"v":{"message":{"id":"final","author":{"role":"assistant"},"content":{"content_type":"text","parts":["正式回答"]},"end_turn":true,"metadata":{"message_type":"next","finish_details":{"type":"stop"}},"recipient":"all","channel":"final"},"conversation_id":"conv-1"}}`,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+	response := &http.Response{Body: io.NopCloser(strings.NewReader(body))}
+	writer := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(writer)
+
+	result := HandlerDetailed(c, response, nil, nil, "request-id", chatGPTRequestForTest(), false, "auto")
+
+	if result.Text != "正式回答" {
+		t.Fatalf("text = %q, want only final message", result.Text)
+	}
+	if result.ParentMessageID != "final" {
+		t.Fatalf("parent message id = %q, want final", result.ParentMessageID)
+	}
+}
+
+func TestHandlerChunkCiteHoldDoesNotDuplicateFinalText(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	marker := "citeturn0search0"
+	alt := "([example](https://example.com))"
+	body := strings.Join([]string{
+		`data: {"choices":[{"delta":{"role":"assistant"}}]}`,
+		`data: {"choices":[{"delta":{"content":"before` + marker + `after"}}]}`,
+		`data: {"p":"/message/metadata/content_references","o":"append","v":{"matched_text":"` + marker + `","alt":"` + alt + `"}}`,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+	response := &http.Response{Body: io.NopCloser(strings.NewReader(body))}
+	writer := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(writer)
+
+	result := HandlerDetailed(c, response, nil, nil, "request-id", chatGPTRequestForTest(), true, "auto")
+
+	want := "before" + alt + "after"
+	if result.Text != want {
+		t.Fatalf("text = %q, want %q", result.Text, want)
+	}
+	if strings.Count(result.Text, alt) != 1 {
+		t.Fatalf("alt duplicated in text: %q", result.Text)
+	}
+}
+
+func TestHandlerFlushesCiteBeforeStopChunk(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	marker := "citeturn0search0"
+	body := strings.Join([]string{
+		`data: {"choices":[{"delta":{"role":"assistant"}}]}`,
+		`data: {"choices":[{"delta":{"content":"before` + marker + `after"}}]}`,
+		`data: {"choices":[{"delta":{},"finish_reason":"stop"}],"conversation_id":"conv-stop"}`,
+		``,
+	}, "\n")
+	response := &http.Response{Body: io.NopCloser(strings.NewReader(body))}
+	writer := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(writer)
+
+	result := HandlerDetailed(c, response, nil, nil, "request-id", chatGPTRequestForTest(), true, "auto")
+
+	if result.Text != "beforeafter" {
+		t.Fatalf("text = %q, want marker removed with surrounding text preserved", result.Text)
+	}
+	output := writer.Body.String()
+	afterIndex := strings.Index(output, `"content":"after"`)
+	stopIndex := strings.Index(output, `"finish_reason":"stop"`)
+	if afterIndex < 0 || stopIndex < 0 || afterIndex > stopIndex {
+		t.Fatalf("held suffix must be emitted before stop chunk: %s", output)
+	}
+}
+
+func TestHandlerFlushesCiteHoldOnEndTurn(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	marker := "citeturn0search0"
+	body := strings.Join([]string{
+		`data: {"p":"/message/content/parts/0","o":"append","v":"before` + marker + `after"}`,
+		`data: {"p":"/message/end_turn","o":"replace","v":true}`,
+		``,
+	}, "\n")
+	response := &http.Response{Body: io.NopCloser(strings.NewReader(body))}
+	writer := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(writer)
+
+	result := HandlerDetailed(c, response, nil, nil, "request-id", chatGPTRequestForTest(), true, "auto")
+
+	if result.Text != "beforeafter" {
+		t.Fatalf("text = %q, want marker removed with surrounding text preserved", result.Text)
+	}
+	output := writer.Body.String()
+	if !strings.Contains(output, `"content":"before"`) || !strings.Contains(output, `"content":"after"`) {
+		t.Fatalf("stream output did not flush held suffix: %s", output)
+	}
+	if strings.ContainsRune(output, '') {
+		t.Fatalf("stream output leaked cite marker: %s", output)
+	}
+}
+
 func TestHandlerCollectsPatchEventsWithoutStreaming(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

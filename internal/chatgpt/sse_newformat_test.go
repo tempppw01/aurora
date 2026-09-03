@@ -87,13 +87,66 @@ func TestPreambleFilterFields(t *testing.T) {
 	}
 }
 
+func TestContentReferencesResetForNewMessage(t *testing.T) {
+	state := &sseparser.PatchState{}
+	oldMarker := "citeold"
+	newMarker := "citenew"
+
+	if _, ok := parseConversationEvent(`{"v":{"message":{"id":"old","author":{"role":"assistant"},"content":{"content_type":"text","parts":["old"]},"metadata":{"message_type":"next"},"recipient":"all","channel":"commentary"},"conversation_id":"conv"}}`, state, "auto"); !ok {
+		t.Fatal("old message should parse")
+	}
+	sseparser.ApplyPatch(state, "/message/metadata/content_references", "append", map[string]interface{}{"matched_text": oldMarker})
+
+	if _, ok := parseConversationEvent(`{"v":{"message":{"id":"new","author":{"role":"assistant"},"content":{"content_type":"text","parts":["new"]},"metadata":{"message_type":"next"},"recipient":"all","channel":"final"},"conversation_id":"conv"}}`, state, "auto"); !ok {
+		t.Fatal("new message should parse")
+	}
+	sseparser.ApplyPatch(state, "/message/metadata/content_references", "append", map[string]interface{}{"matched_text": newMarker})
+	sseparser.ApplyPatch(state, "/message/metadata/content_references/0/alt", "replace", "new-link")
+
+	if got := state.CiteAlts[newMarker]; got != "new-link" {
+		t.Fatalf("new marker mapping = %q, want new-link; map=%#v", got, state.CiteAlts)
+	}
+	if got := state.CiteAlts[oldMarker]; got == "new-link" {
+		t.Fatalf("new alt attached to old marker; map=%#v", state.CiteAlts)
+	}
+}
+
+func TestContentReferencesResetForMessagePatch(t *testing.T) {
+	state := &sseparser.PatchState{}
+	oldMarker := "citeold-patch"
+	newMarker := "citenew-patch"
+
+	sseparser.ApplyPatch(state, "/message/id", "replace", "old")
+	sseparser.ApplyPatch(state, "/message/metadata/content_references", "append", map[string]interface{}{"matched_text": oldMarker})
+	message := map[string]interface{}{
+		"id":        "new",
+		"author":    map[string]interface{}{"role": "assistant"},
+		"content":   map[string]interface{}{"content_type": "text", "parts": []interface{}{"new"}},
+		"metadata":  map[string]interface{}{"message_type": "next"},
+		"recipient": "all",
+		"channel":   "final",
+	}
+	if !sseparser.ApplyPatch(state, "/message", "replace", message) {
+		t.Fatal("message patch should apply")
+	}
+	sseparser.ApplyPatch(state, "/message/metadata/content_references", "append", map[string]interface{}{"matched_text": newMarker})
+	sseparser.ApplyPatch(state, "/message/metadata/content_references/0/alt", "replace", "new-link")
+
+	if got := state.CiteAlts[newMarker]; got != "new-link" {
+		t.Fatalf("new marker mapping = %q, want new-link; map=%#v", got, state.CiteAlts)
+	}
+	if got := state.CiteAlts[oldMarker]; got == "new-link" {
+		t.Fatalf("new alt attached to old marker; map=%#v", state.CiteAlts)
+	}
+}
+
 // 验证 content_references patch 提取 + cite 标记替换 (方案 B)。
 // 数据来自 2026-08 真实抓包: Inflection Pi 回答带 web 搜索引用。
 func TestCiteMarkerReplacement(t *testing.T) {
 	state := &sseparser.PatchState{}
 
-full := "\ue200cite\ue202turn543019search0\ue202turn543019search1\ue201"
-	seg1 := "\ue200cite\ue202turn543019search0\ue202turn543"      // 对象初始 matched_text(截断)
+	full := "\ue200cite\ue202turn543019search0\ue202turn543019search1\ue201"
+	seg1 := "\ue200cite\ue202turn543019search0\ue202turn543" // 对象初始 matched_text(截断)
 
 	// 1. 批量 patch: 正文 append(含截断的 cite 标记) + content_references append
 	frame1 := `{"p":"","o":"patch","v":[
@@ -209,7 +262,7 @@ func TestCiteStreamPipelineFlushNoAlt(t *testing.T) {
 	pipeline := &sseparser.CiteStreamPipeline{}
 
 	marker := string([]rune{0xE200}) + "citeturn999search0" + string([]rune{0xE201})
-	out1 := pipeline.Feed(state.CiteAlts, "前文" + marker + "尾")
+	out1 := pipeline.Feed(state.CiteAlts, "前文"+marker+"尾")
 	// 无 alt → 从标记起点暂存; 标记前的正文照常放行
 	if out1 != "前文" {
 		t.Fatalf("head before marker should flush, got %q", out1)

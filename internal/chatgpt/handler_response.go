@@ -337,6 +337,11 @@ func HandlerDetailedWithOptions(c *gin.Context, response *http.Response, client 
 		}
 		if usedChunkEvents {
 			visibleChunkText.WriteString(flushed)
+		} else {
+			emittedText += flushed
+			if options.OnTextDelta != nil {
+				options.OnTextDelta(flushed)
+			}
 		}
 	}
 readLoop:
@@ -419,8 +424,7 @@ readLoop:
 					sentinel = append(sentinel, streamEvent.chunk.Sentinel)
 				}
 				rawDeltaText := sseparser.NormalizeContentDelta(previous_text.Text, streamEvent.text)
-				deltaText := chatgpt.SanitizedContentDelta(previous_text.Text, rawDeltaText)
-				deltaText = citePipeline.Feed(patchState.CiteAlts, deltaText)
+				deltaText := citePipeline.Feed(patchState.CiteAlts, rawDeltaText)
 				if streamEvent.channel != "" {
 					activeChannel = streamEvent.channel
 				}
@@ -479,6 +483,7 @@ readLoop:
 				if deltaText != "" && options.OnTextDelta != nil {
 					options.OnTextDelta(deltaText)
 				}
+				var terminalChunk *official_types.ChatCompletionChunk
 				if writeStream {
 					outChunk := *streamEvent.chunk
 					willContinue := streamEvent.isStop && max_tokens && convId != "" && assistantMessageID != ""
@@ -499,13 +504,23 @@ readLoop:
 							outChunk.Choices[0].Delta.Role = "assistant"
 						}
 					}
-					if streamEvent.isStop && outChunk.ConversationID == "" {
-						outChunk.ConversationID = convId
+					if streamEvent.isStop {
+						terminal := outChunk
+						terminal.Choices = append([]official_types.Choices(nil), outChunk.Choices...)
+						if terminal.ConversationID == "" {
+							terminal.ConversationID = convId
+						}
+						if len(terminal.Choices) > 0 {
+							terminal.Choices[0].Delta = official_types.Delta{}
+						}
+						terminalChunk = &terminal
+						if len(outChunk.Choices) > 0 {
+							outChunk.Choices[0].FinishReason = nil
+						}
 					}
 					shouldWrite := deltaText != "" ||
 						(streamEvent.role != "" && isRole) ||
-						streamEvent.chunk.Sentinel != nil ||
-						(streamEvent.isStop && !willContinue)
+						streamEvent.chunk.Sentinel != nil
 					if shouldWrite {
 						if err := writeChatCompletionChunk(c, outChunk); err != nil {
 							return HandlerResult{}
@@ -524,6 +539,11 @@ readLoop:
 				}
 				if streamEvent.isStop {
 					flushCites()
+					if terminalChunk != nil && !(max_tokens && convId != "" && assistantMessageID != "") {
+						if err := writeChatCompletionChunk(c, *terminalChunk); err != nil {
+							return HandlerResult{}
+						}
+					}
 					if max_tokens && convId != "" && assistantMessageID != "" {
 						finalizeArtifacts()
 						return HandlerResult{
@@ -576,6 +596,16 @@ readLoop:
 			if streamEvent.channel != "" {
 				activeChannel = streamEvent.channel
 			}
+			// Patch-only frames carry the accumulated message state but may omit
+			// author/recipient metadata. Treat them as assistant snapshots so an
+			// end_turn patch can flush held citation text and close the response.
+			if original_response.Message.Author.Role == "" &&
+				(original_response.Message.EndTurn != nil || len(original_response.Message.Content.Parts) > 0) {
+				original_response.Message.Author.Role = "assistant"
+				if original_response.Message.Recipient == "" {
+					original_response.Message.Recipient = "all"
+				}
+			}
 			if _, isHistory := historyAssistantMessageIDs[original_response.Message.ID]; isHistory {
 				currentEvent = ""
 				continue
@@ -590,6 +620,10 @@ readLoop:
 				continue
 			}
 			if !(original_response.Message.Author.Role == "assistant" || (original_response.Message.Author.Role == "tool" && original_response.Message.Content.ContentType != "text")) || original_response.Message.Content.Parts == nil {
+				continue
+			}
+			if original_response.Message.Metadata.IsThinkingPreambleMessage || original_response.Message.Channel == "commentary" {
+				currentEvent = ""
 				continue
 			}
 			// Rich-response streams frequently send the opening assistant snapshot
@@ -631,6 +665,9 @@ readLoop:
 					textSnapshots[messageID] = textSnapshot
 				}
 			}
+			previousLegacyText := textSnapshot.Text
+			currentLegacyText := chatgpt.TextFromParts(original_response.Message.Content.Parts)
+			rawLegacyDelta := sseparser.NormalizeContentDelta(previousLegacyText, currentLegacyText)
 			if original_response.Message.Recipient != "all" {
 				continue
 			}
@@ -681,6 +718,13 @@ readLoop:
 				// It is not user-visible content; importantly, do not pause the
 				// following text while waiting for citation metadata.
 				continue
+			}
+			if strings.HasPrefix(response_string, "data: ") {
+				var chunk official_types.ChatCompletionChunk
+				if err := json.Unmarshal([]byte(strings.TrimSpace(strings.TrimPrefix(response_string, "data: "))), &chunk); err == nil && len(chunk.Choices) > 0 {
+					chunk.Choices[0].Delta.Content = citePipeline.Feed(patchState.CiteAlts, rawLegacyDelta)
+					response_string = "data: " + chunk.String() + "\n\n"
+				}
 			}
 		endProcess:
 			isRole = false
