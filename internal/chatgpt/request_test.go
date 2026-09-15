@@ -999,7 +999,7 @@ func TestImagePrepareUsesPictureV2AndComposerStateFields(t *testing.T) {
 		},
 	}
 
-	token, err := prepareImageConversation(client, &accounts.Account{}, &TurnStile{}, "draw a cat", "gpt-image-2", NewChatClientState())
+	token, err := prepareImageConversation(client, &accounts.Account{}, &TurnStile{}, "draw a cat", "gpt-image-2.5", NewChatClientState())
 	if err != nil {
 		t.Fatalf("prepareImageConversation returned error: %v", err)
 	}

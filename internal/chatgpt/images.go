@@ -460,9 +460,9 @@ func pollImageResultsWithProgress(client httpclient.AuroraHttpClient, account *a
 
 func imageModelSlug(model string) string {
 	if model == "" || strings.HasPrefix(model, "dall-e") {
-		model = "gpt-image-2"
+		model = "gpt-image-2.5"
 	}
-	if model == "gpt-image-2" || strings.HasPrefix(model, "gpt-image") {
+	if strings.HasPrefix(model, "gpt-image") {
 		return "auto"
 	}
 	return model

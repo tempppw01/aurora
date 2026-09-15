@@ -247,7 +247,7 @@ curl --location 'http://你的服务器ip:8080/v1/images/generations' \
 --header 'Content-Type: application/json' \
 --header 'Authorization: Bearer access_token' \
 --data '{
-  "model": "gpt-image-2",
+  "model": "gpt-image-2.5",
   "prompt": "A cute orange cat wearing sunglasses, digital art",
   "n": 1,
   "size": "1024x1024",
@@ -300,7 +300,7 @@ data: [DONE]
 curl --location 'http://你的服务器ip:8080/v1/images/edits' \
 --header 'Authorization: Bearer access_token' \
 --form 'prompt="把猫改成柴犬"' \
---form 'model="gpt-image-2"' \
+--form 'model="gpt-image-2.5"' \
 --form 'n=1' \
 --form 'response_format="url"' \
 --form 'image=@"/path/to/cat.png"'
@@ -323,7 +323,7 @@ curl --location 'http://你的服务器ip:8080/v1/images/edits' \
 --header 'Content-Type: application/json' \
 --header 'Authorization: Bearer access_token' \
 --data '{
-  "model": "gpt-image-2",
+  "model": "gpt-image-2.5",
   "n": 1,
   "response_format": "url",
   "input": [

@@ -561,7 +561,7 @@ type ImageGenerationRequest struct {
 func (r ImageGenerationRequest) ToAPIRequest() APIRequest {
 	model := r.Model
 	if model == "" || strings.HasPrefix(model, "dall-e") {
-		model = "gpt-image-2"
+		model = "gpt-image-2.5"
 	}
 	prompt := "Generate an image for this request. Return only the generated image, not a text description.\n\n" + r.Prompt
 	return APIRequest{

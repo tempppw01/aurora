@@ -29,9 +29,9 @@ func TestListModelsIncludesImageGenerationModel(t *testing.T) {
 		t.Fatalf("decode models response: %v", err)
 	}
 	for _, model := range payload.Data {
-		if model.ID == "gpt-image-2" {
+		if model.ID == "gpt-image-2.5" {
 			return
 		}
 	}
-	t.Fatalf("gpt-image-2 missing from models response: %#v", payload.Data)
+	t.Fatalf("gpt-image-2.5 missing from models response: %#v", payload.Data)
 }
