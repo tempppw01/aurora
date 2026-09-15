@@ -2,7 +2,7 @@ name: Publish Docker Hub Image
 
 on:
   push:
-    branches: [dev]
+    branches: [main, dev]
   workflow_dispatch:
 
 permissions:
@@ -27,10 +27,13 @@ jobs:
         id: tags
         shell: bash
         run: |
+          tag="dev"
+          if [[ "${GITHUB_REF_NAME}" == "main" ]]; then
+            tag="latest"
+          fi
           {
             echo 'tags<<EOF'
-            echo "${DOCKERHUB_REPOSITORY}:latest"
-            echo "${DOCKERHUB_REPOSITORY}:dev"
+            echo "${DOCKERHUB_REPOSITORY}:${tag}"
             echo 'EOF'
           } >> "${GITHUB_OUTPUT}"
 
