@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	chatgptrequestconverter "aurora/conversion/requests/chatgpt"
@@ -323,6 +324,20 @@ func (h *ChatHandler) Responses(c *gin.Context) {
 	if reqModel == "" {
 		reqModel = "auto"
 	}
+	var instructions string
+	var inputTextParts []string
+	for _, message := range original_request.Messages {
+		if message.Role == "system" {
+			instructions += message.Text()
+		} else {
+			inputTextParts = append(inputTextParts, message.Text())
+		}
+	}
+	cacheWriteTokens, cachedTokens := RecordCache(
+		translated_request.ConversationID,
+		instructions,
+		strings.Join(inputTextParts, "\n"),
+	)
 
 	streamResponses := responsesRequest.Stream && h.cfg.StreamMode
 	startedAt := time.Now()
@@ -353,7 +368,7 @@ func (h *ChatHandler) Responses(c *gin.Context) {
 		c.Writer.Header().Set("Connection", "keep-alive")
 		c.Writer.Header().Set("X-Accel-Buffering", "no")
 		c.Writer.WriteHeader(200)
-		created := officialtypes.NewResponsesResponse("", "", input_tokens, 0, 0, reqModel)
+		created := officialtypes.NewResponsesResponse("", "", input_tokens, 0, 0, cachedTokens, cacheWriteTokens, reqModel)
 		created.ID = responseID
 		created.Status = "in_progress"
 		created.Output = nil
@@ -463,7 +478,7 @@ func (h *ChatHandler) Responses(c *gin.Context) {
 
 	output_tokens := util.CountToken(full_response)
 	reasoningTokens := util.CountToken(full_thinking)
-	responsesResponse := officialtypes.NewResponsesResponse(full_response, full_thinking, input_tokens, output_tokens, reasoningTokens, reqModel)
+	responsesResponse := officialtypes.NewResponsesResponse(full_response, full_thinking, input_tokens, output_tokens, reasoningTokens, cachedTokens, cacheWriteTokens, reqModel)
 	if !streamResponses {
 		c.JSON(200, responsesResponse)
 		return

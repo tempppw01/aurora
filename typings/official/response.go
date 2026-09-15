@@ -283,9 +283,9 @@ type ResponsesCompletedEvent struct {
 }
 
 // NewResponsesResponse returns OpenAI Responses-compatible usage and output
-// structures. Aurora does not claim cache usage because the upstream does not
+// structures. Cache values are local estimates because the upstream does not
 // expose real cache metrics.
-func NewResponsesResponse(text, reasoning string, inputTokens, outputTokens, reasoningTokens int, model string) ResponsesResponse {
+func NewResponsesResponse(text, reasoning string, inputTokens, outputTokens, reasoningTokens, cachedTokens, cacheWriteTokens int, model string) ResponsesResponse {
 	if model == "" {
 		model = "auto"
 	}
@@ -298,7 +298,11 @@ func NewResponsesResponse(text, reasoning string, inputTokens, outputTokens, rea
 		OutputText:       text,
 		ReasoningContent: reasoning,
 		Usage: ResponsesUsage{
-			InputTokens:         inputTokens,
+			InputTokens: inputTokens,
+			InputTokensDetails: ResponsesInputTokensDetails{
+				CachedTokens:     cachedTokens,
+				CacheWriteTokens: cacheWriteTokens,
+			},
 			OutputTokens:        outputTokens,
 			OutputTokensDetails: ResponsesOutputTokensDetails{ReasoningTokens: reasoningTokens},
 			TotalTokens:         inputTokens + outputTokens,

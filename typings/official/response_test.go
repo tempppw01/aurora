@@ -55,14 +55,15 @@ func TestNewChatCompletionWithMetadata(t *testing.T) {
 }
 
 func TestNewResponsesResponseWithReasoning(t *testing.T) {
-	resp := NewResponsesResponse("hello", "thinking...", 100, 50, 30, "auto")
+	resp := NewResponsesResponse("hello", "thinking...", 100, 50, 30, 80, 20, "auto")
 	data, err := json.Marshal(resp)
 	if err != nil {
 		t.Fatalf("marshal response: %v", err)
 	}
 	for _, want := range []string{
 		`"input_tokens":100`,
-		`"cached_tokens":0`,
+		`"cached_tokens":80`,
+		`"cache_write_tokens":20`,
 		`"reasoning_tokens":30`,
 		`"type":"reasoning"`,
 		`"reasoning_text"`,
