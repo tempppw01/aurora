@@ -2,11 +2,7 @@ name: Publish Docker Hub Image
 
 on:
   push:
-    branches:
-      - main
-      - dev
-    paths-ignore:
-      - README.md
+    branches: [dev]
   workflow_dispatch:
 
 permissions:
@@ -27,34 +23,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Read version
-        id: version
-        shell: bash
-        run: |
-          version="$(tr -d '[:space:]' < VERSION)"
-          echo "version=${version}" >> "${GITHUB_OUTPUT}"
-
       - name: Set image tags
         id: tags
         shell: bash
         run: |
-          if [[ "${GITHUB_REF_NAME}" == "main" ]]; then
-            {
-              echo 'tags<<EOF'
-              echo "${DOCKERHUB_REPOSITORY}:latest"
-              echo "${DOCKERHUB_REPOSITORY}:${{ steps.version.outputs.version }}"
-              echo "${DOCKERHUB_REPOSITORY}:sha-${GITHUB_SHA}"
-              echo 'EOF'
-            } >> "${GITHUB_OUTPUT}"
-          else
-            {
-              echo 'tags<<EOF'
-              echo "${DOCKERHUB_REPOSITORY}:dev"
-              echo "${DOCKERHUB_REPOSITORY}:dev-${{ steps.version.outputs.version }}"
-              echo "${DOCKERHUB_REPOSITORY}:dev-sha-${GITHUB_SHA}"
-              echo 'EOF'
-            } >> "${GITHUB_OUTPUT}"
-          fi
+          {
+            echo 'tags<<EOF'
+            echo "${DOCKERHUB_REPOSITORY}:latest"
+            echo "${DOCKERHUB_REPOSITORY}:dev"
+            echo 'EOF'
+          } >> "${GITHUB_OUTPUT}"
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
