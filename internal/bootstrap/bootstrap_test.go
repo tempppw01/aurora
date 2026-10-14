@@ -1,6 +1,7 @@
 package bootstrap
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -113,6 +114,39 @@ func TestRotatedTokenSurvivesReload(t *testing.T) {
 	}
 	if loaded[0].TeamID != "team-a" {
 		t.Errorf("teamID = %q, want %q", loaded[0].TeamID, "team-a")
+	}
+}
+
+func TestMigrateRotatedSessionMetadataPreservesEmail(t *testing.T) {
+	chdirTemp(t)
+	oldID := managedAccountID("session", "old-session")
+	newID := managedAccountID("session", "new-session")
+	initial := map[string]map[string]interface{}{
+		oldID: {"email": "person@example.test", "status": "active"},
+	}
+	data, err := json.Marshal(initial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile("account_metadata.json", data, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	migrateRotatedSessionMetadata("old-session", "new-session")
+
+	data, err = os.ReadFile("account_metadata.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]map[string]interface{}
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := got[oldID]; ok {
+		t.Fatalf("old metadata key still exists: %#v", got)
+	}
+	if got[newID]["email"] != "person@example.test" {
+		t.Fatalf("new metadata = %#v", got[newID])
 	}
 }
 

@@ -461,8 +461,20 @@ func NewOpenAISessionToken(session_token string, access_token string) *OpenAIAcc
 }
 
 type ImageGenerationResponse struct {
-	Created int64                 `json:"created"`
-	Data    []ImageGenerationData `json:"data"`
+	Created        int64                 `json:"created"`
+	Data           []ImageGenerationData `json:"data"`
+	Status         string                `json:"status"`
+	Usage          ImageGenerationUsage  `json:"usage"`
+	UsageEstimated bool                  `json:"usage_estimated"`
+}
+
+// ImageGenerationUsage reports image units separately from text token usage.
+// The upstream image service does not expose token counts for image generation.
+type ImageGenerationUsage struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens"`
+	ImagesGenerated  int `json:"images_generated"`
 }
 
 type ImageGenerationData struct {
@@ -471,10 +483,17 @@ type ImageGenerationData struct {
 	RevisedPrompt string `json:"revised_prompt,omitempty"`
 }
 
-func NewImageGenerationResponse(data []ImageGenerationData) ImageGenerationResponse {
+func NewImageGenerationResponse(data []ImageGenerationData, promptTokenCounts ...int) ImageGenerationResponse {
+	promptTokens := 1
+	if len(promptTokenCounts) > 0 {
+		promptTokens = promptTokenCounts[0]
+	}
+	usage := EstimatedImageUsage(data, promptTokens)
 	return ImageGenerationResponse{
 		Created: 0,
 		Data:    data,
+		Status:  "completed",
+		Usage:   usage, UsageEstimated: true,
 	}
 }
 
@@ -482,10 +501,16 @@ func NewImageGenerationResponse(data []ImageGenerationData) ImageGenerationRespo
 // 用于 /v1/images/edits 接口,保持 OpenAI 官方响应兼容。
 type ImageEditResponse = ImageGenerationResponse
 
-func NewImageEditResponse(data []ImageGenerationData) ImageEditResponse {
+func NewImageEditResponse(data []ImageGenerationData, promptTokenCounts ...int) ImageEditResponse {
+	promptTokens := 1
+	if len(promptTokenCounts) > 0 {
+		promptTokens = promptTokenCounts[0]
+	}
 	return ImageEditResponse{
 		Created: 0,
 		Data:    data,
+		Status:  "completed",
+		Usage:   EstimatedImageUsage(data, promptTokens), UsageEstimated: true,
 	}
 }
 
@@ -493,11 +518,28 @@ func NewImageEditResponse(data []ImageGenerationData) ImageEditResponse {
 // 用于 /v1/images/variations 接口,保持 OpenAI 官方响应兼容。
 type ImageVariationResponse = ImageGenerationResponse
 
-func NewImageVariationResponse(data []ImageGenerationData) ImageVariationResponse {
+func NewImageVariationResponse(data []ImageGenerationData, promptTokenCounts ...int) ImageVariationResponse {
+	promptTokens := 1
+	if len(promptTokenCounts) > 0 {
+		promptTokens = promptTokenCounts[0]
+	}
 	return ImageVariationResponse{
 		Created: 0,
 		Data:    data,
+		Status:  "completed",
+		Usage:   EstimatedImageUsage(data, promptTokens), UsageEstimated: true,
 	}
+}
+
+func EstimatedImageUsage(data []ImageGenerationData, promptTokens int) ImageGenerationUsage {
+	if len(data) == 0 {
+		return ImageGenerationUsage{}
+	}
+	if promptTokens < 1 {
+		promptTokens = 1
+	}
+	completionTokens := len(data) * 1000
+	return ImageGenerationUsage{PromptTokens: promptTokens, CompletionTokens: completionTokens, TotalTokens: promptTokens + completionTokens, ImagesGenerated: len(data)}
 }
 
 // ── Audio Transcriptions / Translations ──

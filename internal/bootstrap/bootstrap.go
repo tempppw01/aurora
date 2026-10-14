@@ -282,6 +282,9 @@ func exchangeSessionToken(acct *accounts.Account) bool {
 	if rotated != "" && rotated != acct.SessionToken {
 		oldToken := acct.SessionToken
 		acct.SessionToken = rotated
+		// Session tokens rotate on exchange. Keep metadata keyed by the old
+		// token hash aligned with the newly persisted credential.
+		migrateRotatedSessionMetadata(oldToken, rotated)
 		persistRotatedSessionToken(oldToken, rotated, acct.TeamUserID)
 	}
 	return true
@@ -326,6 +329,42 @@ func persistRotatedSessionToken(oldToken, newToken, teamID string) {
 }
 
 // writeFileAtomic 先写同目录临时文件再 rename，保证凭据文件不会被写成半截。
+func migrateRotatedSessionMetadata(oldToken, newToken string) {
+	if oldToken == "" || newToken == "" || oldToken == newToken {
+		return
+	}
+	const path = "account_metadata.json"
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	var metadata map[string]map[string]interface{}
+	if json.Unmarshal(data, &metadata) != nil {
+		return
+	}
+	oldID := managedAccountID("session", oldToken)
+	newID := managedAccountID("session", newToken)
+	oldMeta, ok := metadata[oldID]
+	if !ok {
+		return
+	}
+	if _, exists := metadata[newID]; !exists {
+		metadata[newID] = oldMeta
+	} else {
+		for key, value := range oldMeta {
+			current, exists := metadata[newID][key]
+			if !exists || current == nil || current == "" {
+				metadata[newID][key] = value
+			}
+		}
+	}
+	delete(metadata, oldID)
+	encoded, err := json.MarshalIndent(metadata, "", "  ")
+	if err == nil {
+		writeFileAtomic(path, append(encoded, 10))
+	}
+}
+
 func writeFileAtomic(path string, data []byte) {
 	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp")

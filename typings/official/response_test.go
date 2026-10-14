@@ -89,3 +89,31 @@ func TestResponsesOutputItemEvents(t *testing.T) {
 		}
 	}
 }
+
+func TestImageGenerationResponseReportsImageUsage(t *testing.T) {
+	response := NewImageGenerationResponse([]ImageGenerationData{{URL: "https://example.test/image.png"}}, 12)
+	data, err := json.Marshal(response)
+	if err != nil {
+		t.Fatalf("marshal image response: %v", err)
+	}
+	for _, want := range []string{
+		`"status":"completed"`,
+		`"images_generated":1`,
+		`"prompt_tokens":12`,
+		`"completion_tokens":1000`,
+		`"total_tokens":1012`,
+		`"usage_estimated":true`,
+		`"url":"https://example.test/image.png"`,
+	} {
+		if !strings.Contains(string(data), want) {
+			t.Fatalf("missing %q in %s", want, data)
+		}
+	}
+}
+
+func TestEstimatedImageUsageIsZeroWithoutImages(t *testing.T) {
+	usage := EstimatedImageUsage(nil, 42)
+	if usage.PromptTokens != 0 || usage.CompletionTokens != 0 || usage.TotalTokens != 0 || usage.ImagesGenerated != 0 {
+		t.Fatalf("empty image usage = %#v, want all zero", usage)
+	}
+}

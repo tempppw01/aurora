@@ -24,6 +24,7 @@ import (
 	"aurora/internal/config"
 	"aurora/internal/imageflow"
 	officialtypes "aurora/typings/official"
+	"aurora/util"
 
 	"github.com/gin-gonic/gin"
 	_ "golang.org/x/image/webp"
@@ -89,10 +90,21 @@ type imageStreamResult struct {
 }
 
 type imageStreamCompleted struct {
-	Object  string                              `json:"object"`
-	Created int64                               `json:"created"`
-	Model   string                              `json:"model,omitempty"`
-	Data    []officialtypes.ImageGenerationData `json:"data"`
+	Object         string                              `json:"object"`
+	Created        int64                               `json:"created"`
+	Model          string                              `json:"model,omitempty"`
+	Data           []officialtypes.ImageGenerationData `json:"data"`
+	Status         string                              `json:"status"`
+	Usage          officialtypes.ImageGenerationUsage  `json:"usage"`
+	UsageEstimated bool                                `json:"usage_estimated"`
+}
+
+func countEstimatedImagePromptTokens(prompt string) int {
+	count := util.CountToken(prompt)
+	if count < 1 {
+		return 1
+	}
+	return count
 }
 
 func writeImageStreamHeader(c *gin.Context) {
@@ -468,15 +480,18 @@ func (h *ImageHandler) Generations(c *gin.Context) {
 	}
 	if stream {
 		writeImageStreamEvent(c, "image.generation.completed", imageStreamCompleted{
-			Object:  "image.generation.completed",
-			Created: 0,
-			Model:   imageRequest.Model,
-			Data:    data,
+			Object:         "image.generation.completed",
+			Created:        0,
+			Model:          imageRequest.Model,
+			Data:           data,
+			Status:         "completed",
+			Usage:          officialtypes.EstimatedImageUsage(data, countEstimatedImagePromptTokens(upstreamPrompt)),
+			UsageEstimated: true,
 		})
 		writeImageStreamDone(c)
 		return
 	}
-	c.JSON(200, officialtypes.NewImageGenerationResponse(data))
+	c.JSON(200, officialtypes.NewImageGenerationResponse(data, countEstimatedImagePromptTokens(upstreamPrompt)))
 }
 
 // ─── Image Edit / Variation types ────────────────────────────────
@@ -1290,18 +1305,21 @@ func (h *ImageHandler) runImageEditFlow(c *gin.Context, asVariation bool) {
 	}
 	if stream {
 		writeImageStreamEvent(c, "image.generation.completed", imageStreamCompleted{
-			Object:  "image.generation.completed",
-			Created: 0,
-			Model:   model,
-			Data:    data,
+			Object:         "image.generation.completed",
+			Created:        0,
+			Model:          model,
+			Data:           data,
+			Status:         "completed",
+			Usage:          officialtypes.EstimatedImageUsage(data, countEstimatedImagePromptTokens(upstreamPrompt)),
+			UsageEstimated: true,
 		})
 		writeImageStreamDone(c)
 		return
 	}
 	if asVariation {
-		c.JSON(200, officialtypes.NewImageVariationResponse(data))
+		c.JSON(200, officialtypes.NewImageVariationResponse(data, countEstimatedImagePromptTokens(upstreamPrompt)))
 	} else {
-		c.JSON(200, officialtypes.NewImageEditResponse(data))
+		c.JSON(200, officialtypes.NewImageEditResponse(data, countEstimatedImagePromptTokens(upstreamPrompt)))
 	}
 }
 
