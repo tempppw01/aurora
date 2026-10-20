@@ -6,13 +6,16 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"aurora/internal/accounts"
+	"aurora/internal/config"
+
 	"github.com/gin-gonic/gin"
 )
 
 func TestListModelsIncludesImageGenerationModel(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
-	router.GET("/v1/models", NewModelsHandler().ListModels)
+	router.GET("/v1/models", NewModelsHandler(accounts.NewPool(nil), &config.Config{}).ListModels)
 
 	response := httptest.NewRecorder()
 	router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/models", nil))
@@ -28,10 +31,13 @@ func TestListModelsIncludesImageGenerationModel(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
 		t.Fatalf("decode models response: %v", err)
 	}
+	ids := make(map[string]bool, len(payload.Data))
 	for _, model := range payload.Data {
-		if model.ID == "gpt-image-2.5" {
-			return
+		ids[model.ID] = true
+	}
+	for _, want := range []string{"gpt-image-2.5", "gpt-6", "gpt-6-thinking"} {
+		if !ids[want] {
+			t.Fatalf("%s missing from models response: %#v", want, payload.Data)
 		}
 	}
-	t.Fatalf("gpt-image-2.5 missing from models response: %#v", payload.Data)
 }

@@ -24,7 +24,7 @@ func RegisterRouter(accountPool *accounts.Pool, cfg *config.Config) *gin.Engine 
 	imageHandler := NewImageHandler(accountPool, cfg)
 	audioHandler := NewAudioHandler(accountPool, cfg)
 	authHandler := NewAuthHandler(accountPool)
-	modelsHandler := NewModelsHandler()
+	modelsHandler := NewModelsHandler(accountPool, cfg)
 	adminHandler := NewAdminHandler(accountPool, cfg)
 
 	// 初始化基础前置参数（DPL、BasicCookies 等）

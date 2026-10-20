@@ -210,6 +210,15 @@ curl --location 'http://你的服务器ip:8080/v1/models' \
 --header 'Authorization: Bearer access_token'
 ```
 
+Aurora 返回的模型列表由两部分合并去重而成：
+
+- **静态基线**：`auto`、`gpt-6`、`gpt-6-instant`、`gpt-6-thinking`、`gpt-6-pro`、`gpt-5-6`、`gpt-5-6-t-mini`、`gpt-5-6-thinking`、`gpt-5-6-pro`、`gpt-5-5-instant`、`gpt-5-5-thinking`、`gpt-5-5-pro`、`gpt-5`、`gpt-4o`、`gpt-4o-mini`、`o3`、`o4-mini`、`o4-mini-high`、`gpt-image-2.5`。
+- **上游实时列表**：Aurora 会用登录态账号从 ChatGPT Web 的 `/backend-api/models` 拉取当前可见的模型（带 5 分钟缓存），新模型上线后会自动出现在列表里。
+
+上游不可用时（没有登录态账号、网络异常等）接口会回退到静态基线，不会返回错误。图片模型 `gpt-image-2.5` 不在上游列表里，因此始终保留在静态基线中。
+
+`gpt-6-thinking`、`gpt-5-6-t-mini`、`gpt-5-6-thinking` 是显式思考模型，会自动以 `model=auto` + `system_hints=["reason"]` 方式请求上游。其它模型只要带上 `reasoning_effort`（`medium`/`extended`/`high`/`xhigh`/`max`）也会走同样的思考模式。
+
 ## 文件上传和文件问答
 
 上传文件：

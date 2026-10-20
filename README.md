@@ -19,7 +19,7 @@ Aurora 将 ChatGPT Web 后端能力转换为类 OpenAI API，支持聊天、Resp
 - `/v1/audio/speech` 语音合成（TTS），兼容常见 OpenAI voice 和输出格式。
 - `/v1/audio/transcriptions` 语音转文字，支持 mp3/wav/m4a/ogg/flac/webm 格式。
 - `/v1/audio/translations` 音频翻译为英文。
-- `/v1/models` 模型列表接口。
+- `/v1/models` 模型列表接口。返回静态基线（含 `gpt-6` 系列与 `gpt-image-2.5`）与上游 ChatGPT Web 实时模型列表的合并结果，新模型上线后自动可见；上游不可用时回退到静态基线。
 - `/auth/refresh`：传入 OpenAI `refresh_token` 获取 `access_token`。
 - `/auth/session`：传入 ChatGPT `session_token` 获取新的 `session_token` 和 `access_token`。
 - `/backend-api/conversation` 原始 ChatGPT conversation 请求透传。

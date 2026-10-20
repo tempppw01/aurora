@@ -62,6 +62,10 @@ type RequestLogStore struct {
 	path    string
 	max     int
 	entries []requestLogEntry
+	// lastAt 记录最后一条日志的时间戳。Windows 上 time.Now() 精度较粗，
+	// 连续两次请求可能拿到完全相同的时间戳，导致排序出现并列。
+	// 写入时保证时间戳严格递增即可消除这个问题。
+	lastAt time.Time
 }
 
 func NewRequestLogStore(path string, max int) *RequestLogStore {
@@ -89,16 +93,36 @@ func (s *RequestLogStore) load() {
 		entries = entries[len(entries)-s.max:]
 	}
 	s.entries = entries
+	for _, entry := range entries {
+		if ts, err := time.Parse(time.RFC3339Nano, entry.CreatedAt); err == nil && ts.After(s.lastAt) {
+			s.lastAt = ts
+		}
+	}
 }
 
 func (s *RequestLogStore) append(entry requestLogEntry) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	entry.CreatedAt = s.nextTimestamp(entry.CreatedAt)
 	s.entries = append(s.entries, entry)
 	if len(s.entries) > s.max {
 		s.entries = append([]requestLogEntry(nil), s.entries[len(s.entries)-s.max:]...)
 	}
 	_ = s.saveLocked()
+}
+
+// nextTimestamp 保证写入的时间戳严格递增。若当前时间戳不晚于上一条，
+// 则在上一条基础上加 1 纳秒，避免同一纳秒内的多条日志顺序不确定。
+func (s *RequestLogStore) nextTimestamp(raw string) string {
+	ts, err := time.Parse(time.RFC3339Nano, raw)
+	if err != nil {
+		ts = time.Now().UTC()
+	}
+	if !ts.After(s.lastAt) {
+		ts = s.lastAt.Add(time.Nanosecond)
+	}
+	s.lastAt = ts
+	return ts.UTC().Format(time.RFC3339Nano)
 }
 
 func (s *RequestLogStore) saveLocked() error {
@@ -179,8 +203,28 @@ func (s *RequestLogStore) filtered(filter requestLogFilter) ([]requestLogEntry, 
 		summary.SuccessRate = float64(summary.Success) * 100 / float64(summary.Total)
 	}
 
-	sort.Slice(filtered, func(i, j int) bool { return filtered[i].CreatedAt > filtered[j].CreatedAt })
+	sort.Slice(filtered, func(i, j int) bool { return requestLogEntryNewer(filtered[i], filtered[j]) })
 	return filtered, summary
+}
+
+// requestLogEntryNewer 判断 a 是否比 b 更新。
+// CreatedAt 是 RFC3339Nano 字符串，末尾的零会被裁掉，直接按字符串比较会出错
+// （例如 "…3163816Z" 会被认为比 "…31638161Z" 更新），所以按解析出的时间比较，
+// 时间相同时用 ID 兜底保证顺序稳定。
+func requestLogEntryNewer(a, b requestLogEntry) bool {
+	at, aErr := time.Parse(time.RFC3339Nano, a.CreatedAt)
+	bt, bErr := time.Parse(time.RFC3339Nano, b.CreatedAt)
+	aOK, bOK := aErr == nil, bErr == nil
+	switch {
+	case aOK && bOK && !at.Equal(bt):
+		return at.After(bt)
+	case aOK != bOK:
+		return aOK
+	case a.CreatedAt != b.CreatedAt:
+		return a.CreatedAt > b.CreatedAt
+	default:
+		return a.ID > b.ID
+	}
 }
 
 func (s *RequestLogStore) page(page, pageSize int, filter requestLogFilter) ([]requestLogEntry, requestLogSummary, requestLogPage) {
