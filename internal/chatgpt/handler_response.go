@@ -228,6 +228,7 @@ func HandlerDetailedWithOptions(c *gin.Context, response *http.Response, client 
 	var emittedText string
 	var activeChannel string
 	var assistantMessageID string
+	var waitSource bool
 	visibleText := func() string {
 		if usedChunkEvents {
 			return strings.Join(imgSource, "") + visibleChunkText.String()
@@ -242,9 +243,6 @@ func HandlerDetailedWithOptions(c *gin.Context, response *http.Response, client 
 	var readingWebsocket bool
 	var websocketStream io.ReadCloser
 	var deferredHTTPOutput []deferredLegacyOutput
-	shouldDeferHTTPOutput := func() bool {
-		return !readingWebsocket && handoffTopicID != "" && wsConn != nil
-	}
 	flushDeferredHTTPOutput := func() error {
 		for _, output := range deferredHTTPOutput {
 			if output.delta != "" {
@@ -768,6 +766,7 @@ readLoop:
 					c.Writer.Flush()
 				}
 				finalizeArtifacts()
+				willContinue := max_tokens && convId != "" && assistantMessageID != ""
 				if willContinue {
 					return HandlerResult{
 						Text:              visibleText(),
