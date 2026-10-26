@@ -156,12 +156,15 @@ func HandlerDetailedWithWebsocket(c *gin.Context, response *http.Response, clien
 
 // HandlerDetailedOptions 是 HandlerDetailedWithOptions 的可选参数。
 type HandlerDetailedOptions struct {
-	Websocket        *websocket.Conn
-	ClientState      *ChatClientState
-	ArtifactDelivery string
-	ProxyURL         string
-	Tools            []official_types.Tool
-	SuppressOutput   bool
+	Websocket            *websocket.Conn
+	ClientState          *ChatClientState
+	ArtifactDelivery     string
+	ProxyURL             string
+	Tools                []official_types.Tool
+	SuppressStreamOutput bool
+	SuppressOutput       bool
+	OnTextDelta          func(string)
+	OnThinkingDelta      func(string)
 }
 
 // HandlerDetailedWithOptions 处理对话响应流（最完整版）。
@@ -190,7 +193,7 @@ func HandlerDetailedWithOptions(c *gin.Context, response *http.Response, client 
 		}
 	}
 
-	streamOutput := stream && !options.SuppressOutput
+	streamOutput := stream && !options.SuppressStreamOutput && !options.SuppressOutput
 	if streamOutput {
 		c.Header("Content-Type", "text/event-stream")
 		c.Header("Cache-Control", "no-cache")
@@ -430,6 +433,7 @@ readLoop:
 					}
 					isEnd = true
 				}
+				willContinue := streamEvent.isStop && max_tokens && convId != "" && assistantMessageID != ""
 				if activeChannel == "analysis" {
 					emitThinking(streamEvent.text)
 					if streamEvent.isStop {
@@ -480,7 +484,6 @@ readLoop:
 				var terminalChunk *official_types.ChatCompletionChunk
 				if streamOutput {
 					outChunk := *streamEvent.chunk
-					willContinue := streamEvent.isStop && max_tokens && convId != "" && assistantMessageID != ""
 					if len(outChunk.Choices) > 0 {
 						outChunk.Choices[0].Delta.Content = deltaText
 						if willContinue {
