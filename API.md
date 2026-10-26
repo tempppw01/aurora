@@ -185,6 +185,8 @@ curl --location 'http://你的服务器ip:8080/v1/chat/completions' \
 
 ## Responses API
 
+`/v1/responses` 支持与 Chat Completions 相同的工具调用模拟，并使用 Responses API 的扁平 `tools` 结构、`function_call` 输出项和 `function_call_output` 回传项。Codex CLI 可通过 `previous_response_id` 继续工具调用链。
+
 ```bash
 curl --location 'http://你的服务器ip:8080/v1/responses' \
 --header 'Content-Type: application/json' \
@@ -197,13 +199,66 @@ curl --location 'http://你的服务器ip:8080/v1/responses' \
 }'
 ```
 
-### Responses 流式事件与推理参数
+### Responses 工具调用
+
+```json
+{
+  "model": "gpt-5",
+  "input": "读取 README.md",
+  "tools": [{
+    "type": "function",
+    "name": "read_file",
+    "description": "读取文件",
+    "parameters": {
+      "type": "object",
+      "properties": {"path": {"type": "string"}},
+      "required": ["path"]
+    },
+    "strict": true
+  }],
+  "stream": true
+}
+```
+
+工具调用以 `output[].type = "function_call"` 返回。执行工具后，把结果作为下一次请求的 `input`，并携带上一响应的 `id`：
+
+```json
+{
+  "model": "gpt-5",
+  "previous_response_id": "resp_...",
+  "input": [{
+    "type": "function_call_output",
+    "call_id": "call_...",
+    "output": "文件内容"
+  }],
+  "tools": [{"type": "function", "name": "read_file", "parameters": {"type": "object"}}],
+  "stream": true
+}
+```
+
+流式工具调用事件顺序为 `response.created` → `response.output_item.added` → `response.function_call_arguments.delta` → `response.function_call_arguments.done` → `response.output_item.done` → `response.completed`。
+
+### Responses 流式事件序列
 
 将 `stream` 设为 `true` 后，接口会按 SSE 实时返回 `response.created`、`response.output_item.added`、`response.reasoning_text.delta`（上游提供推理内容时）、`response.output_text.delta`、`response.output_item.done`、`response.completed` 和最终的 `data: [DONE]`。
 
 `reasoning.effort` 支持 `none`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`；Aurora 会映射为 ChatGPT 上游可接受的 `low`、`standard`、`high` 三档强度。最终 `response.completed` 的 `usage` 包含输入、输出、推理 token 明细，另含 `ms_since_start` 与 `ms_ttft`（首个输出到达耗时）。`cached_tokens` 与 `cache_write_tokens` 是基于请求文本和 5 分钟 TTL 的本地估算，ChatGPT 上游不提供真实缓存用量。
 
 ## 模型列表
+
+`GET /v1/models` 每次请求 ChatGPT 的 `/backend-api/models`，将上游 `models[].slug` 映射为 OpenAI 格式的 `data[].id`，按上游顺序去重并忽略空 slug，不再返回硬编码模型列表。
+
+- 使用服务密钥时，从账号池选择可用的登录账号（free 优先，其次 puid）；匿名 UUID 账号不支持此接口。
+- 外部 access_token 沿用 `ENABLE_EXTERNAL_TOKEN` 配置；工作区可通过 `ChatGPT-Account-ID` 指定。配置了服务密钥时，外部 token 的请求头为 `Authorization: Bearer 服务密钥 access_token`。
+- 列表取决于本次选中的账号、订阅和工作区，账号池轮询可能返回不同列表。
+- `object` 为 `model`，`owned_by` 为 `openai`；上游不提供创建时间，因此 `created` 固定为 `0`（未知）。
+- 上游 HTTP 错误返回对应错误状态；网络异常或无效响应返回 `502`，没有登录账号返回 `401`。不会用旧静态列表兜底。
+
+响应示例（模型 ID 仅为示意）：
+
+```json
+{"object":"list","data":[{"id":"upstream-model-slug","object":"model","created":0,"owned_by":"openai"}]}
+```
 
 ```bash
 curl --location 'http://你的服务器ip:8080/v1/models' \

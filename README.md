@@ -12,7 +12,7 @@ Aurora 将 ChatGPT Web 后端能力转换为类 OpenAI API，支持聊天、Resp
 
 - OpenAI 风格的 `/v1/chat/completions`，支持流式和非流式返回，支持 `temperature`/`top_p`/`max_tokens`/`stop`/`reasoning_effort`/`response_format`/`stream_options.include_usage` 等参数。
 - 工具调用 (Tool Calling) 模拟 — ChatGPT Web 不原生支持 function calling，Aurora 通过 `<tool_call>` 文本协议模拟该能力，支持 `tools`/`tool_choice` 字段，自动注入 system prompt 并解析模型输出中的 `<tool_call>` 块为标准 OpenAI 格式的 `tool_calls`。
-- OpenAI 风格的 `/v1/responses`，支持字符串输入、消息数组、`instructions`、流式事件，以及 `reasoning.effort`/`text.query.format`/`temperature` 等参数。
+- OpenAI 风格的 `/v1/responses`，支持字符串输入、消息数组、`instructions`、流式事件、`previous_response_id` 多轮续接和 Responses 格式 Tool Calling，以及 `reasoning.effort`/`text.query.format`/`temperature` 等参数。
 - `/v1/files` 文件上传，上传后可在聊天或 Responses 请求中携带 `file_id` 做文件问答。
 - `/v1/images/generations` 图片生成，模型列表包含 `gpt-image-2.5`，支持 SSE 流式返回，支持 URL 或 `b64_json`。
 - `/v1/images/edits` 改图 + `/v1/images/variations` 图生图（变体）。
@@ -161,7 +161,15 @@ ENABLE_EXTERNAL_TOKEN=true
 - `refresh_tokens.txt`：每行一个 OpenAI `refresh_token`（支持 `token:team_id` 格式），启动时自动交换为 `access_token`，过期后自动续期。
 - `session_tokens.txt`：每行一个 ChatGPT `session_token`（支持 `token:team_id` 格式），启动时自动交换为 `access_token`，过期后自动续期。
 - `proxies.txt`：每行一个代理 URL（需要包含端口），与 `PROXY_URL` 一起组成代理池。
+## 项目趋势
 
+<div align="center">
+
+<a href="https://trendshift.io/repositories/9094?utm_source=repository-badge&amp;utm_medium=badge&amp;utm_campaign=badge-repository-9094" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/repositories/9094" alt="aurora-develop%2Faurora | Trendshift" width="250" height="55"/></a>
+
+</div>
+
+---
 ## 注意事项
 
 - 图片、TTS、文件能力依赖登录态 access token，免费 UUID 账号不可用。

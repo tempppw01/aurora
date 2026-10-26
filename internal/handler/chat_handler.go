@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -262,6 +263,22 @@ func (h *ChatHandler) Responses(c *gin.Context) {
 		return
 	}
 
+	var previousClientState *chatgpt.ChatClientState
+	if responsesRequest.PreviousResponseID != "" {
+		var callNames map[string]string
+		previousClientState, callNames = h.sessions.GetResponse(responsesRequest.PreviousResponseID)
+		if previousClientState == nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{
+				"message": "Unknown previous_response_id: " + responsesRequest.PreviousResponseID,
+				"type":    "invalid_request_error",
+				"param":   "previous_response_id",
+				"code":    "invalid_previous_response_id",
+			}})
+			return
+		}
+		responsesRequest.ApplyFunctionCallNames(callNames)
+	}
+
 	original_request, err := responsesRequest.ToAPIRequest()
 	if err != nil {
 		c.JSON(400, gin.H{"error": gin.H{
@@ -312,11 +329,17 @@ func (h *ChatHandler) Responses(c *gin.Context) {
 
 	// 按 conversationID 复用 ChatClientState，保持 DeviceID/SessionID 一致
 	var clientState *chatgpt.ChatClientState
-	if translated_request.ConversationID != "" {
+	if previousClientState != nil {
+		clientState = previousClientState
+	} else if translated_request.ConversationID != "" {
 		clientState = h.sessions.Get(translated_request.ConversationID)
 	}
 	if clientState == nil {
 		clientState = chatgpt.NewChatClientState()
+	}
+	if previousClientState != nil {
+		translated_request.ConversationID = clientState.ConversationID
+		translated_request.ParentMessageID = clientState.ParentMessageID
 	}
 	clientState.ConversationID = translated_request.ConversationID
 	clientState.ParentMessageID = translated_request.ParentMessageID
@@ -324,6 +347,32 @@ func (h *ChatHandler) Responses(c *gin.Context) {
 	if reqModel == "" {
 		reqModel = "auto"
 	}
+
+	toolsEnabled := toolCallingEnabled(original_request.Tools, h.cfg) && !original_request.ToolChoice.IsForcedNone()
+	if toolsEnabled {
+		result, ok := h.executeToolCalling(c, &original_request, &client, account, &clientState, &reqModel, &uid, &proxyUrl)
+		if !ok {
+			return
+		}
+		outputTokens := util.CountToken(result.Text)
+		responsesResponse := officialtypes.NewResponsesResponseWithToolCalls(
+			result.Text, "", result.ToolCalls,
+			input_tokens, outputTokens, 0, 0, 0, reqModel,
+		)
+		callNames := make(map[string]string, len(result.ToolCalls))
+		for _, call := range result.ToolCalls {
+			callNames[call.ID] = call.Function.Name
+		}
+		h.sessions.RegisterResponse(responsesResponse.ID, clientState, callNames)
+		if responsesRequest.Stream {
+			h.writeResponsesToolCallingStream(c, responsesResponse, result.ToolCalls)
+			return
+		}
+		c.JSON(http.StatusOK, responsesResponse)
+		return
+	}
+
+	// 提取 instructions / input 用于缓存模拟
 	var instructions string
 	var inputTextParts []string
 	for _, message := range original_request.Messages {
@@ -476,10 +525,63 @@ func (h *ChatHandler) Responses(c *gin.Context) {
 		return
 	}
 
-	output_tokens := util.CountToken(full_response)
-	reasoningTokens := util.CountToken(full_thinking)
-	responsesResponse := officialtypes.NewResponsesResponse(full_response, full_thinking, input_tokens, output_tokens, reasoningTokens, cachedTokens, cacheWriteTokens, reqModel)
-	if !streamResponses {
+		var full_response string
+		var full_thinking string
+		var conversationID string
+		for i := h.cfg.MaxContinueCount; i > 0; i-- {
+			var continue_info *chatgpt.ContinueInfo
+			result := chatgpt.HandlerDetailedWithOptions(c, response, client, account, uid, translated_request, false, reqModel, chatgpt.HandlerDetailedOptions{
+				Websocket:   wsConn,
+				ClientState: clientState,
+			})
+			wsConn = nil
+			full_response += result.Text
+			full_thinking += result.ThinkingText
+			parentMessageID := result.ParentMessageID
+			continue_info = result.Continue
+			if continue_info != nil {
+				parentMessageID = continue_info.ParentID
+			}
+			clientState.NoteTurnResult(result.ConversationID, parentMessageID)
+			if result.ConversationID != "" {
+				conversationID = result.ConversationID
+				h.sessions.Register(conversationID, clientState)
+			}
+			if continue_info == nil {
+				break
+			}
+			translated_request.Messages = nil
+			translated_request.Action = "continue"
+			translated_request.ConversationID = continue_info.ConversationID
+			translated_request.ParentMessageID = continue_info.ParentID
+
+			response, wsConn, _, status, err = conversationClientOrder(&client, account, translated_request, proxyUrl, false, clientState, h.accountPool)
+			if err != nil {
+				c.JSON(status, gin.H{"error": gin.H{
+					"message": err.Error(),
+					"type":    "request_conversion_error",
+					"param":   "model",
+					"code":    "request_conversion_error",
+				}})
+				return
+			}
+			defer response.Body.Close()
+			if chatgpt.Handle_request_error(c, response) {
+				if wsConn != nil {
+					wsConn.Close()
+					wsConn = nil
+				}
+				return
+			}
+		}
+		if c.Writer.Status() != 200 {
+			return
+		}
+
+		output_tokens := util.CountToken(full_response)
+		reasoning_tokens := util.CountToken(full_thinking)
+		responsesResponse := officialtypes.NewResponsesResponse(full_response, full_thinking, input_tokens, output_tokens, reasoning_tokens, cachedTokens, cacheWriteTokens, reqModel)
+		h.sessions.RegisterResponse(responsesResponse.ID, clientState, nil)
 		c.JSON(200, responsesResponse)
 		return
 	}
@@ -487,20 +589,138 @@ func (h *ChatHandler) Responses(c *gin.Context) {
 	if reasoningAdded {
 		writeResponsesStreamEvent(c, "response.output_item.done", officialtypes.ResponsesOutputItemDone(reasoningIndex, reasoningItemID, "reasoning", full_thinking))
 	}
-	writeResponsesStreamEvent(c, "response.output_item.done", officialtypes.ResponsesOutputItemDone(messageIndex, messageItemID, "message", full_response))
-	responsesResponse.ID = responseID
-	for i := range responsesResponse.Output {
-		if responsesResponse.Output[i].Type == "reasoning" {
-			responsesResponse.Output[i].ID = reasoningItemID
-		} else {
-			responsesResponse.Output[i].ID = messageItemID
+
+	response, wsConn, _, _, err := conversationClientOrder(&client, account, translated_request, proxyUrl, true, clientState, h.accountPool)
+	if err != nil {
+		c.Writer.WriteString("event: response.failed\ndata: " + responsesFailedEvent(err.Error()) + "\n\n")
+		if flusher != nil {
+			flusher.Flush()
+		}
+		return
+	}
+	defer response.Body.Close()
+	if chatgpt.Handle_request_error(c, response) {
+		if wsConn != nil {
+			wsConn.Close()
+			wsConn = nil
+		}
+		c.Writer.WriteString("event: response.failed\ndata: " + responsesFailedEvent("upstream error") + "\n\n")
+		if flusher != nil {
+			flusher.Flush()
+		}
+		return
+	}
+
+	var full_response string
+	var full_thinking string
+	var conversationID string
+	ttftSet := false
+	var ttftMs int64
+
+	for i := h.cfg.MaxContinueCount; i > 0; i-- {
+		var continue_info *chatgpt.ContinueInfo
+		result := chatgpt.HandlerDetailedWithOptions(c, response, client, account, uid, translated_request, true, reqModel, chatgpt.HandlerDetailedOptions{
+			Websocket:      wsConn,
+			ClientState:    clientState,
+			SuppressOutput: true,
+		})
+		wsConn = nil
+		full_response += result.Text
+		full_thinking += result.ThinkingText
+
+		// 思维链增量
+		if result.ThinkingText != "" {
+			reasoningEvt := officialtypes.ResponsesReasoningDeltaEvent{
+				Type:         "response.reasoning_text.delta",
+				ItemID:       reasoningItemID,
+				OutputIndex:  0,
+				ContentIndex: 0,
+				Delta:        result.ThinkingText,
+			}
+			c.Writer.WriteString("event: response.reasoning_text.delta\ndata: " + reasoningEvt.String() + "\n\n")
+		}
+
+		// 正文增量
+		if result.Text != "" {
+			if !ttftSet {
+				ttftSet = true
+				ttftMs = time.Since(startTime).Milliseconds()
+			}
+			textEvt := officialtypes.ResponsesTextDeltaEvent{
+				Type:         "response.output_text.delta",
+				ItemID:       messageItemID,
+				OutputIndex:  1,
+				ContentIndex: 0,
+				Delta:        result.Text,
+			}
+			c.Writer.WriteString("event: response.output_text.delta\ndata: " + textEvt.String() + "\n\n")
+		}
+
+		if flusher != nil {
+			flusher.Flush()
+		}
+
+		parentMessageID := result.ParentMessageID
+		continue_info = result.Continue
+		if continue_info != nil {
+			parentMessageID = continue_info.ParentID
+		}
+		clientState.NoteTurnResult(result.ConversationID, parentMessageID)
+		if result.ConversationID != "" {
+			conversationID = result.ConversationID
+			h.sessions.Register(conversationID, clientState)
+		}
+		if continue_info == nil {
+			break
+		}
+		translated_request.Messages = nil
+		translated_request.Action = "continue"
+		translated_request.ConversationID = continue_info.ConversationID
+		translated_request.ParentMessageID = continue_info.ParentID
+
+		response, wsConn, _, _, err = conversationClientOrder(&client, account, translated_request, proxyUrl, true, clientState, h.accountPool)
+		if err != nil {
+			c.Writer.WriteString("event: response.failed\ndata: " + responsesFailedEvent(err.Error()) + "\n\n")
+			if flusher != nil {
+				flusher.Flush()
+			}
+			return
+		}
+		defer response.Body.Close()
+		if chatgpt.Handle_request_error(c, response) {
+			if wsConn != nil {
+				wsConn.Close()
+				wsConn = nil
+			}
+			c.Writer.WriteString("event: response.failed\ndata: " + responsesFailedEvent("upstream error") + "\n\n")
+			if flusher != nil {
+				flusher.Flush()
+			}
+			return
 		}
 	}
 	responsesResponse.MsSinceStart = time.Since(startedAt).Milliseconds()
 	responsesResponse.MsTTFT = firstOutputAt
 
-	writeResponsesStreamEvent(c, "response.completed", officialtypes.ResponsesCompleted(responsesResponse))
-	writeResponsesStreamDone(c)
+	// output_item.done (reasoning)
+	c.Writer.WriteString("event: response.output_item.done\ndata: " + responsesOutputItemDoneEvent(0, reasoningItemID, "reasoning", full_thinking) + "\n\n")
+	// output_item.done (message)
+	c.Writer.WriteString("event: response.output_item.done\ndata: " + responsesOutputItemDoneEvent(1, messageItemID, "message", full_response) + "\n\n")
+
+	output_tokens := util.CountToken(full_response)
+	reasoning_tokens := util.CountToken(full_thinking)
+	responsesResponse := officialtypes.NewResponsesResponse(full_response, full_thinking, input_tokens, output_tokens, reasoning_tokens, cachedTokens, cacheWriteTokens, reqModel)
+	responsesResponse.ID = respID
+	responsesResponse.MsSinceStart = time.Since(startTime).Milliseconds()
+	if ttftSet {
+		responsesResponse.MsTTFT = ttftMs
+	}
+	h.sessions.RegisterResponse(responsesResponse.ID, clientState, nil)
+	// response.completed
+	c.Writer.WriteString("event: response.completed\ndata: " + responsesCompletedEvent(responsesResponse) + "\n\n")
+	if flusher != nil {
+		flusher.Flush()
+	}
 }
 
 func writeResponsesStreamEvent(c *gin.Context, event, data string) {
@@ -587,11 +807,85 @@ func (h *ChatHandler) Files(c *gin.Context) {
 	c.JSON(200, uploaded)
 }
 
+func (h *ChatHandler) writeResponsesToolCallingStream(c *gin.Context, response officialtypes.ResponsesResponse, calls []officialtypes.ToolCall) {
+	c.Writer.Header().Set("Content-Type", "text/event-stream")
+	c.Writer.Header().Set("Cache-Control", "no-cache")
+	c.Writer.Header().Set("Connection", "keep-alive")
+	c.Writer.Header().Set("X-Accel-Buffering", "no")
+
+	c.Writer.WriteString("event: response.created\ndata: " + responsesCreatedEvent(response.ID, response.Model) + "\n\n")
+	if len(calls) == 0 && len(response.Output) > 0 {
+		item := response.Output[len(response.Output)-1]
+		outputIndex := len(response.Output) - 1
+		c.Writer.WriteString("event: response.output_item.added\ndata: " + responsesOutputItemAddedEvent(outputIndex, item.ID, "message") + "\n\n")
+		if response.OutputText != "" {
+			textEvent := officialtypes.ResponsesTextDeltaEvent{
+				Type:         "response.output_text.delta",
+				ItemID:       item.ID,
+				OutputIndex:  outputIndex,
+				ContentIndex: 0,
+				Delta:        response.OutputText,
+			}
+			writeResponsesSSEEvent(c, "response.output_text.delta", textEvent)
+		}
+		c.Writer.WriteString("event: response.output_item.done\ndata: " + responsesOutputItemDoneEvent(outputIndex, item.ID, "message", response.OutputText) + "\n\n")
+	}
+	for i, call := range calls {
+		itemID := response.Output[i].ID
+		writeResponsesSSEEvent(c, "response.output_item.added", officialtypes.ResponsesFunctionCallAddedEvent(i, itemID, call))
+		writeResponsesSSEEvent(c, "response.function_call_arguments.delta", officialtypes.ResponsesFunctionCallArgumentsDeltaEvent(i, itemID, call.Function.Arguments))
+		writeResponsesSSEEvent(c, "response.function_call_arguments.done", officialtypes.ResponsesFunctionCallArgumentsDoneEvent(i, itemID, call))
+		writeResponsesSSEEvent(c, "response.output_item.done", officialtypes.ResponsesFunctionCallDoneEvent(i, itemID, call))
+	}
+	writeResponsesSSEEvent(c, "response.completed", officialtypes.ResponsesCompletedEvent{
+		Type:     "response.completed",
+		Response: response,
+	})
+	c.Writer.Flush()
+}
+
+func writeResponsesSSEEvent(c *gin.Context, event string, payload interface{}) {
+	data, _ := json.Marshal(payload)
+	c.Writer.WriteString("event: " + event + "\ndata: " + string(data) + "\n\n")
+}
+
+type toolCallingResult struct {
+	Text           string
+	ToolCalls      []officialtypes.ToolCall
+	ConversationID string
+	Sentinel       []map[string]interface{}
+}
+
 // handleToolCalling 工具调用模式的主流程（对齐 initialize/handlers.go:handleToolCalling）
-func (h *ChatHandler) handleToolCalling(c *gin.Context, originalRequest *officialtypes.APIRequest, client **bogdanfinn.TlsClient, account *accounts.Account, clientState **chatgpt.ChatClientState, reqModel *string, uid *string, proxyUrl *string, inputTokens *int, stream bool) {
+func (h *ChatHandler) handleToolCalling(c *gin.Context, originalRequest *officialtypes.APIRequest, client **bogdanfinn.TlsClient, account *accounts.Account, clientState **chatgpt.ChatClientState, reqModel *string, uid *string, proxyUrl *string, inputTokens *int) {
+	result, ok := h.executeToolCalling(c, originalRequest, client, account, clientState, reqModel, uid, proxyUrl)
+	if !ok {
+		return
+	}
+	if len(result.ToolCalls) > 0 {
+		c.JSON(200, officialtypes.NewChatCompletionWithToolCalls(
+			result.Text, "", result.ToolCalls,
+			*inputTokens, util.CountToken(result.Text),
+			*reqModel, result.ConversationID, result.Sentinel,
+		))
+		return
+	}
+	outputTokens := util.CountToken(result.Text)
+	c.JSON(200, officialtypes.NewChatCompletionWithMetadata(result.Text, *inputTokens, outputTokens, *reqModel, result.ConversationID, result.Sentinel))
+}
+
+func applyClientStateToToolRequest(request *chatgpt_types.ChatGPTRequest, state *chatgpt.ChatClientState) {
+	if request == nil || state == nil || request.ConversationID != "" || state.ConversationID == "" {
+		return
+	}
+	request.ConversationID = state.ConversationID
+	request.ParentMessageID = state.ParentMessageID
+}
+
+func (h *ChatHandler) executeToolCalling(c *gin.Context, originalRequest *officialtypes.APIRequest, client **bogdanfinn.TlsClient, account *accounts.Account, clientState **chatgpt.ChatClientState, reqModel *string, uid *string, proxyUrl *string) (toolCallingResult, bool) {
 	if account == nil || !account.Type.Satisfies(accounts.CapToolCalling) {
 		c.JSON(403, gin.H{"error": "Tool calling requires a logged-in ChatGPT account."})
-		return
+		return toolCallingResult{}, false
 	}
 	tools := originalRequest.Tools
 	maxRefusalRetries := h.cfg.RefusalRetries
@@ -600,6 +894,7 @@ func (h *ChatHandler) handleToolCalling(c *gin.Context, originalRequest *officia
 	}
 
 	baseTranslated := chatgptrequestconverter.ConvertAPIRequest(*originalRequest, account, *proxyUrl, *client)
+	applyClientStateToToolRequest(&baseTranslated, *clientState)
 	if baseTranslated.ConversationID != "" {
 		*clientState = h.sessions.Get(baseTranslated.ConversationID)
 	}
@@ -629,7 +924,7 @@ func (h *ChatHandler) handleToolCalling(c *gin.Context, originalRequest *officia
 				"param":   "model",
 				"code":    "request_conversion_error",
 			}})
-			return
+			return toolCallingResult{}, false
 		}
 		result := chatgpt.HandlerDetailedWithOptions(c, response, *client, account, *uid, translated, false, *reqModel, chatgpt.HandlerDetailedOptions{
 			Websocket:        wsConn,
@@ -678,24 +973,12 @@ func (h *ChatHandler) handleToolCalling(c *gin.Context, originalRequest *officia
 		}
 	}
 
-	if len(lastToolCalls) > 0 {
-		if stream {
-			writeToolCallStream(c, *reqModel, lastConversationID, lastToolCalls)
-			return
-		}
-		c.JSON(200, officialtypes.NewChatCompletionWithToolCalls(
-			lastText, "", lastToolCalls,
-			*inputTokens, util.CountToken(lastText),
-			*reqModel, lastConversationID, lastSentinel,
-		))
-		return
-	}
-	if stream {
-		writeTextStream(c, *reqModel, lastConversationID, lastText)
-		return
-	}
-	outputTokens := util.CountToken(lastText)
-	c.JSON(200, officialtypes.NewChatCompletionWithMetadata(lastText, *inputTokens, outputTokens, *reqModel, lastConversationID, lastSentinel))
+	return toolCallingResult{
+		Text:           lastText,
+		ToolCalls:      lastToolCalls,
+		ConversationID: lastConversationID,
+		Sentinel:       lastSentinel,
+	}, true
 }
 
 func writeToolCallStream(c *gin.Context, model, conversationID string, calls []officialtypes.ToolCall) {

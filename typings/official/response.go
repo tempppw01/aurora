@@ -2,7 +2,11 @@ package official
 
 import (
 	"encoding/json"
+	"fmt"
+	"strings"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 type ChatCompletionChunk struct {
@@ -258,19 +262,23 @@ type ResponsesResponse struct {
 	OutputText       string                `json:"output_text"`
 	Usage            ResponsesUsage        `json:"usage"`
 	ReasoningContent string                `json:"reasoning_content,omitempty"`
-	MsSinceStart     int64                 `json:"ms_since_start,omitempty"`
-	MsTTFT           int64                 `json:"ms_ttft,omitempty"`
+	// MsSinceStart / MsTTFT 是流式响应的耗时信息（毫秒），嵌入 response.completed 事件。
+	MsSinceStart int64 `json:"ms_since_start,omitempty"`
+	MsTTFT       int64 `json:"ms_ttft,omitempty"`
 }
 
 type ResponsesTextDeltaEvent struct {
-	Type         string `json:"type"`
+	Type         string `json:"type"` // "response.output_text.delta"
 	ItemID       string `json:"item_id,omitempty"`
 	OutputIndex  int    `json:"output_index"`
 	ContentIndex int    `json:"content_index"`
 	Delta        string `json:"delta"`
 }
 
-func (e ResponsesTextDeltaEvent) String() string { data, _ := json.Marshal(e); return string(data) }
+func (e ResponsesTextDeltaEvent) String() string {
+	b, _ := json.Marshal(e)
+	return string(b)
+}
 
 type ResponsesCreatedEvent struct {
 	Type     string            `json:"type"`
@@ -282,15 +290,16 @@ type ResponsesCompletedEvent struct {
 	Response ResponsesResponse `json:"response"`
 }
 
-// NewResponsesResponse returns OpenAI Responses-compatible usage and output
-// structures. Cache values are local estimates because the upstream does not
-// expose real cache metrics.
-func NewResponsesResponse(text, reasoning string, inputTokens, outputTokens, reasoningTokens, cachedTokens, cacheWriteTokens int, model string) ResponsesResponse {
+func NewResponsesResponse(text, reasoning string, inputTokens, outputTokens, reasoningTokens int, cachedTokens, cacheWriteTokens int, model string) ResponsesResponse {
+	return NewResponsesResponseWithToolCalls(text, reasoning, nil, inputTokens, outputTokens, reasoningTokens, cachedTokens, cacheWriteTokens, model)
+}
+
+func NewResponsesResponseWithToolCalls(text, reasoning string, toolCalls []ToolCall, inputTokens, outputTokens, reasoningTokens int, cachedTokens, cacheWriteTokens int, model string) ResponsesResponse {
 	if model == "" {
 		model = "auto"
 	}
-	response := ResponsesResponse{
-		ID:               "resp_QXlha2FBbmROaXhpZUFyZUF3ZXNvbWUK",
+	resp := ResponsesResponse{
+		ID:               "resp_" + uuid.NewString(),
 		Object:           "response",
 		CreatedAt:        time.Now().Unix(),
 		Status:           "completed",
@@ -303,32 +312,62 @@ func NewResponsesResponse(text, reasoning string, inputTokens, outputTokens, rea
 				CachedTokens:     cachedTokens,
 				CacheWriteTokens: cacheWriteTokens,
 			},
-			OutputTokens:        outputTokens,
-			OutputTokensDetails: ResponsesOutputTokensDetails{ReasoningTokens: reasoningTokens},
-			TotalTokens:         inputTokens + outputTokens,
+			OutputTokens: outputTokens,
+			OutputTokensDetails: ResponsesOutputTokensDetails{
+				ReasoningTokens: reasoningTokens,
+			},
+			TotalTokens: inputTokens + outputTokens,
 		},
-		Output: []ResponsesOutputItem{
-			{
-				ID:     "msg_QXlha2FBbmROaXhpZUFyZUF3ZXNvbWUK",
-				Type:   "message",
-				Status: "completed",
-				Role:   "assistant",
-				Content: []ResponsesContentPart{
-					{
-						Type: "output_text",
-						Text: text,
-					},
-				},
+	}
+	if len(toolCalls) > 0 {
+		resp.OutputText = ""
+		resp.Output = make([]ResponsesOutputItem, 0, len(toolCalls))
+		for i, call := range toolCalls {
+			resp.Output = append(resp.Output, responsesFunctionCallItem(i, call, true))
+		}
+		return resp
+	}
+	resp.Output = []ResponsesOutputItem{
+		{
+			ID:     "msg_QXlha2FBbmROaXhpZUFyZUF3ZXNvbWUK",
+			Type:   "message",
+			Status: "completed",
+			Role:   "assistant",
+			Content: []ResponsesContentPart{
+				{Type: "output_text", Text: text},
 			},
 		},
 	}
 	if reasoning != "" {
-		response.Output = append([]ResponsesOutputItem{{
-			ID: "rs_QXlha2FBbmROaXhpZUFyZUF3ZXNvbWUK", Type: "reasoning", Status: "completed",
-			Content: []ResponsesContentPart{{Type: "reasoning_text", Text: reasoning}},
-		}}, response.Output...)
+		resp.Output = append([]ResponsesOutputItem{
+			{
+				ID:     "rs_QXlha2FBbmROaXhpZUFyZUF3ZXNvbWUK",
+				Type:   "reasoning",
+				Status: "completed",
+				Content: []ResponsesContentPart{
+					{Type: "reasoning_text", Text: reasoning},
+				},
+			},
+		}, resp.Output...)
 	}
-	return response
+	return resp
+}
+
+func responsesFunctionCallItem(index int, call ToolCall, completed bool) ResponsesOutputItem {
+	status := "in_progress"
+	arguments := ""
+	if completed {
+		status = "completed"
+		arguments = call.Function.Arguments
+	}
+	return ResponsesOutputItem{
+		ID:        fmt.Sprintf("fc_%d_%s", index, strings.TrimPrefix(call.ID, "call_")),
+		Type:      "function_call",
+		Status:    status,
+		CallID:    call.ID,
+		Name:      call.Function.Name,
+		Arguments: arguments,
+	}
 }
 
 func ResponsesTextDelta(text string) string {
@@ -340,83 +379,6 @@ func ResponsesTextDelta(text string) string {
 	}
 	resp, _ := json.Marshal(event)
 	return string(resp)
-}
-
-// ResponsesUsage mirrors the public Responses API usage shape. Cache values
-// remain zero unless a future upstream source can provide real measurements.
-type ResponsesUsage struct {
-	InputTokens         int                          `json:"input_tokens"`
-	InputTokensDetails  ResponsesInputTokensDetails  `json:"input_tokens_details"`
-	OutputTokens        int                          `json:"output_tokens"`
-	OutputTokensDetails ResponsesOutputTokensDetails `json:"output_tokens_details"`
-	TotalTokens         int                          `json:"total_tokens"`
-}
-
-type ResponsesInputTokensDetails struct {
-	CachedTokens     int `json:"cached_tokens"`
-	CacheWriteTokens int `json:"cache_write_tokens"`
-}
-
-type ResponsesOutputTokensDetails struct {
-	ReasoningTokens int `json:"reasoning_tokens"`
-}
-
-type ResponsesOutputItem struct {
-	ID      string                 `json:"id"`
-	Type    string                 `json:"type"`
-	Status  string                 `json:"status,omitempty"`
-	Role    string                 `json:"role,omitempty"`
-	Content []ResponsesContentPart `json:"content"`
-}
-
-type ResponsesContentPart struct {
-	Type string `json:"type"`
-	Text string `json:"text"`
-}
-
-type ResponsesReasoningDeltaEvent struct {
-	Type         string `json:"type"`
-	ItemID       string `json:"item_id"`
-	OutputIndex  int    `json:"output_index"`
-	ContentIndex int    `json:"content_index"`
-	Delta        string `json:"delta"`
-}
-
-func (e ResponsesReasoningDeltaEvent) String() string {
-	data, _ := json.Marshal(e)
-	return string(data)
-}
-
-type ResponsesOutputItemEvent struct {
-	Type        string              `json:"type"`
-	OutputIndex int                 `json:"output_index"`
-	Item        ResponsesOutputItem `json:"item"`
-}
-
-func ResponsesOutputItemAdded(outputIndex int, itemID, itemType string) string {
-	return responsesOutputItemEvent("response.output_item.added", outputIndex, itemID, itemType, "in_progress", "")
-}
-
-func ResponsesOutputItemDone(outputIndex int, itemID, itemType, text string) string {
-	return responsesOutputItemEvent("response.output_item.done", outputIndex, itemID, itemType, "completed", text)
-}
-
-func responsesOutputItemEvent(eventType string, outputIndex int, itemID, itemType, status, text string) string {
-	item := ResponsesOutputItem{ID: itemID, Type: itemType, Status: status}
-	if itemType == "message" {
-		item.Role = "assistant"
-		item.Content = []ResponsesContentPart{{Type: "output_text", Text: text}}
-	}
-	if itemType == "reasoning" {
-		item.Content = []ResponsesContentPart{{Type: "reasoning_text", Text: text}}
-	}
-	data, _ := json.Marshal(ResponsesOutputItemEvent{Type: eventType, OutputIndex: outputIndex, Item: item})
-	return string(data)
-}
-
-func ResponsesFailed(message string) string {
-	data, _ := json.Marshal(map[string]interface{}{"type": "response.failed", "response": map[string]interface{}{"error": map[string]string{"message": message, "type": "server_error"}}})
-	return string(data)
 }
 
 func ResponsesCreated(response ResponsesResponse) string {
@@ -436,6 +398,162 @@ func ResponsesCompleted(response ResponsesResponse) string {
 	}
 	resp, _ := json.Marshal(event)
 	return string(resp)
+}
+
+// ── OpenAI Responses API 扩展类型（对齐 openai-node responses.ts） ──
+
+// ResponsesUsage 对齐 OpenAI ResponseUsage。
+type ResponsesUsage struct {
+	InputTokens         int                          `json:"input_tokens"`
+	InputTokensDetails  ResponsesInputTokensDetails  `json:"input_tokens_details"`
+	OutputTokens        int                          `json:"output_tokens"`
+	OutputTokensDetails ResponsesOutputTokensDetails `json:"output_tokens_details"`
+	TotalTokens         int                          `json:"total_tokens"`
+}
+
+type ResponsesInputTokensDetails struct {
+	CachedTokens     int `json:"cached_tokens"`
+	CacheWriteTokens int `json:"cache_write_tokens"`
+}
+
+type ResponsesOutputTokensDetails struct {
+	ReasoningTokens int `json:"reasoning_tokens"`
+}
+
+// ResponsesOutputItem 对齐 OpenAI ResponseOutputItem 的最小形态。
+type ResponsesOutputItem struct {
+	ID        string                 `json:"id,omitempty"`
+	Type      string                 `json:"type"` // "message" | "reasoning" | "function_call"
+	Status    string                 `json:"status,omitempty"`
+	Role      string                 `json:"role,omitempty"`
+	Content   []ResponsesContentPart `json:"content,omitempty"`
+	CallID    string                 `json:"call_id,omitempty"`
+	Name      string                 `json:"name,omitempty"`
+	Arguments string                 `json:"arguments,omitempty"`
+}
+
+type ResponsesContentPart struct {
+	Type string `json:"type"` // "output_text" | "reasoning_text"
+	Text string `json:"text"`
+}
+
+// ResponsesReasoningItem 用于最终 output 数组里的思维链项。
+type ResponsesReasoningItem struct {
+	ID      string                 `json:"id"`
+	Type    string                 `json:"type"` // "reasoning"
+	Status  string                 `json:"status"`
+	Content []ResponsesContentPart `json:"content"`
+}
+
+type ResponsesFunctionCallAdded struct {
+	Type        string              `json:"type"`
+	OutputIndex int                 `json:"output_index"`
+	Item        ResponsesOutputItem `json:"item"`
+}
+
+type ResponsesFunctionCallArgumentsDelta struct {
+	Type        string `json:"type"`
+	ItemID      string `json:"item_id"`
+	OutputIndex int    `json:"output_index"`
+	Delta       string `json:"delta"`
+}
+
+type ResponsesFunctionCallArgumentsDone struct {
+	Type        string `json:"type"`
+	ItemID      string `json:"item_id"`
+	OutputIndex int    `json:"output_index"`
+	CallID      string `json:"call_id"`
+	Name        string `json:"name"`
+	Arguments   string `json:"arguments"`
+}
+
+type ResponsesFunctionCallDone struct {
+	Type        string              `json:"type"`
+	OutputIndex int                 `json:"output_index"`
+	Item        ResponsesOutputItem `json:"item"`
+}
+
+func ResponsesFunctionCallAddedEvent(outputIndex int, itemID string, call ToolCall) ResponsesFunctionCallAdded {
+	item := responsesFunctionCallItem(outputIndex, call, false)
+	item.ID = itemID
+	return ResponsesFunctionCallAdded{
+		Type:        "response.output_item.added",
+		OutputIndex: outputIndex,
+		Item:        item,
+	}
+}
+
+func ResponsesFunctionCallArgumentsDeltaEvent(outputIndex int, itemID, delta string) ResponsesFunctionCallArgumentsDelta {
+	return ResponsesFunctionCallArgumentsDelta{
+		Type:        "response.function_call_arguments.delta",
+		ItemID:      itemID,
+		OutputIndex: outputIndex,
+		Delta:       delta,
+	}
+}
+
+func ResponsesFunctionCallArgumentsDoneEvent(outputIndex int, itemID string, call ToolCall) ResponsesFunctionCallArgumentsDone {
+	return ResponsesFunctionCallArgumentsDone{
+		Type:        "response.function_call_arguments.done",
+		ItemID:      itemID,
+		OutputIndex: outputIndex,
+		CallID:      call.ID,
+		Name:        call.Function.Name,
+		Arguments:   call.Function.Arguments,
+	}
+}
+
+func ResponsesFunctionCallDoneEvent(outputIndex int, itemID string, call ToolCall) ResponsesFunctionCallDone {
+	item := responsesFunctionCallItem(outputIndex, call, true)
+	item.ID = itemID
+	return ResponsesFunctionCallDone{
+		Type:        "response.output_item.done",
+		OutputIndex: outputIndex,
+		Item:        item,
+	}
+}
+
+// ResponsesReasoningDeltaEvent 流式思维链事件。
+type ResponsesReasoningDeltaEvent struct {
+	Type         string `json:"type"` // "response.reasoning_text.delta"
+	ItemID       string `json:"item_id"`
+	OutputIndex  int    `json:"output_index"`
+	ContentIndex int    `json:"content_index"`
+	Delta        string `json:"delta"`
+}
+
+func (e ResponsesReasoningDeltaEvent) String() string {
+	b, _ := json.Marshal(e)
+	return string(b)
+}
+
+type ResponsesOutputItemEvent struct {
+	Type        string              `json:"type"`
+	OutputIndex int                 `json:"output_index"`
+	Item        ResponsesOutputItem `json:"item"`
+}
+
+func ResponsesOutputItemAdded(i int, id, kind string) string {
+	return responsesOutputItemEvent("response.output_item.added", i, id, kind, "in_progress", "")
+}
+func ResponsesOutputItemDone(i int, id, kind, text string) string {
+	return responsesOutputItemEvent("response.output_item.done", i, id, kind, "completed", text)
+}
+func responsesOutputItemEvent(eventType string, i int, id, kind, status, text string) string {
+	item := ResponsesOutputItem{ID: id, Type: kind, Status: status}
+	if kind == "message" {
+		item.Role = "assistant"
+		item.Content = []ResponsesContentPart{{Type: "output_text", Text: text}}
+	}
+	if kind == "reasoning" {
+		item.Content = []ResponsesContentPart{{Type: "reasoning_text", Text: text}}
+	}
+	data, _ := json.Marshal(ResponsesOutputItemEvent{Type: eventType, OutputIndex: i, Item: item})
+	return string(data)
+}
+func ResponsesFailed(message string) string {
+	data, _ := json.Marshal(map[string]interface{}{"type": "response.failed", "response": map[string]interface{}{"error": map[string]string{"message": message, "type": "server_error"}}})
+	return string(data)
 }
 
 type OpenAIAccessTokenWithSession struct {
@@ -467,14 +585,22 @@ type ImageGenerationResponse struct {
 	Usage          ImageGenerationUsage  `json:"usage"`
 	UsageEstimated bool                  `json:"usage_estimated"`
 }
-
-// ImageGenerationUsage reports image units separately from text token usage.
-// The upstream image service does not expose token counts for image generation.
 type ImageGenerationUsage struct {
 	PromptTokens     int `json:"prompt_tokens"`
 	CompletionTokens int `json:"completion_tokens"`
 	TotalTokens      int `json:"total_tokens"`
 	ImagesGenerated  int `json:"images_generated"`
+}
+
+func EstimatedImageUsage(data []ImageGenerationData, prompt int) ImageGenerationUsage {
+	if len(data) == 0 {
+		return ImageGenerationUsage{}
+	}
+	if prompt < 1 {
+		prompt = 1
+	}
+	output := len(data) * 1000
+	return ImageGenerationUsage{PromptTokens: prompt, CompletionTokens: output, TotalTokens: prompt + output, ImagesGenerated: len(data)}
 }
 
 type ImageGenerationData struct {
@@ -483,17 +609,10 @@ type ImageGenerationData struct {
 	RevisedPrompt string `json:"revised_prompt,omitempty"`
 }
 
-func NewImageGenerationResponse(data []ImageGenerationData, promptTokenCounts ...int) ImageGenerationResponse {
-	promptTokens := 1
-	if len(promptTokenCounts) > 0 {
-		promptTokens = promptTokenCounts[0]
-	}
-	usage := EstimatedImageUsage(data, promptTokens)
+func NewImageGenerationResponse(data []ImageGenerationData) ImageGenerationResponse {
 	return ImageGenerationResponse{
 		Created: 0,
 		Data:    data,
-		Status:  "completed",
-		Usage:   usage, UsageEstimated: true,
 	}
 }
 
@@ -501,16 +620,10 @@ func NewImageGenerationResponse(data []ImageGenerationData, promptTokenCounts ..
 // 用于 /v1/images/edits 接口,保持 OpenAI 官方响应兼容。
 type ImageEditResponse = ImageGenerationResponse
 
-func NewImageEditResponse(data []ImageGenerationData, promptTokenCounts ...int) ImageEditResponse {
-	promptTokens := 1
-	if len(promptTokenCounts) > 0 {
-		promptTokens = promptTokenCounts[0]
-	}
+func NewImageEditResponse(data []ImageGenerationData) ImageEditResponse {
 	return ImageEditResponse{
 		Created: 0,
 		Data:    data,
-		Status:  "completed",
-		Usage:   EstimatedImageUsage(data, promptTokens), UsageEstimated: true,
 	}
 }
 
@@ -518,28 +631,11 @@ func NewImageEditResponse(data []ImageGenerationData, promptTokenCounts ...int) 
 // 用于 /v1/images/variations 接口,保持 OpenAI 官方响应兼容。
 type ImageVariationResponse = ImageGenerationResponse
 
-func NewImageVariationResponse(data []ImageGenerationData, promptTokenCounts ...int) ImageVariationResponse {
-	promptTokens := 1
-	if len(promptTokenCounts) > 0 {
-		promptTokens = promptTokenCounts[0]
-	}
+func NewImageVariationResponse(data []ImageGenerationData) ImageVariationResponse {
 	return ImageVariationResponse{
 		Created: 0,
 		Data:    data,
-		Status:  "completed",
-		Usage:   EstimatedImageUsage(data, promptTokens), UsageEstimated: true,
 	}
-}
-
-func EstimatedImageUsage(data []ImageGenerationData, promptTokens int) ImageGenerationUsage {
-	if len(data) == 0 {
-		return ImageGenerationUsage{}
-	}
-	if promptTokens < 1 {
-		promptTokens = 1
-	}
-	completionTokens := len(data) * 1000
-	return ImageGenerationUsage{PromptTokens: promptTokens, CompletionTokens: completionTokens, TotalTokens: promptTokens + completionTokens, ImagesGenerated: len(data)}
 }
 
 // ── Audio Transcriptions / Translations ──

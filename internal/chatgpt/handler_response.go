@@ -161,14 +161,7 @@ type HandlerDetailedOptions struct {
 	ArtifactDelivery string
 	ProxyURL         string
 	Tools            []official_types.Tool
-	// SuppressStreamOutput keeps parsing an upstream stream but leaves writing
-	// to the caller. It is used by /v1/responses, whose SSE event shape differs
-	// from Chat Completions.
-	SuppressStreamOutput bool
-	OnTextDelta          func(string)
-	// OnThinkingDelta lets protocol adapters expose reasoning without changing
-	// the Chat Completions stream shape.
-	OnThinkingDelta func(string)
+	SuppressOutput   bool
 }
 
 // HandlerDetailedWithOptions 处理对话响应流（最完整版）。
@@ -197,7 +190,8 @@ func HandlerDetailedWithOptions(c *gin.Context, response *http.Response, client 
 		}
 	}
 
-	if stream {
+	streamOutput := stream && !options.SuppressOutput
+	if streamOutput {
 		c.Header("Content-Type", "text/event-stream")
 		c.Header("Cache-Control", "no-cache")
 		c.Header("Connection", "keep-alive")
@@ -270,7 +264,7 @@ func HandlerDetailedWithOptions(c *gin.Context, response *http.Response, client 
 			return
 		}
 		sentinel = append(sentinel, items...)
-		if !writeStream {
+		if !streamOutput {
 			return
 		}
 		for _, item := range items {
@@ -313,7 +307,7 @@ func HandlerDetailedWithOptions(c *gin.Context, response *http.Response, client 
 			"kind":  "analysis",
 			"delta": delta,
 		}})
-		if writeStream {
+		if streamOutput {
 			reasoningChunk := official_types.NewReasoningChunk(delta, model)
 			if convId != "" {
 				reasoningChunk.ConversationID = convId
@@ -330,10 +324,11 @@ func HandlerDetailedWithOptions(c *gin.Context, response *http.Response, client 
 		if flushed == "" {
 			return
 		}
-		if writeStream {
-			chunk := official_types.NewChatCompletionChunk(flushed, model)
-			chunk.ConversationID = convId
-			_ = writeChatCompletionChunk(c, chunk)
+		if streamOutput {
+			flushChunk := official_types.NewChatCompletionChunk(flushed, model)
+			flushChunk.ConversationID = convId
+			c.Writer.WriteString("data: " + flushChunk.String() + "\n\n")
+			c.Writer.Flush()
 		}
 		if usedChunkEvents {
 			visibleChunkText.WriteString(flushed)
@@ -438,8 +433,7 @@ readLoop:
 				if activeChannel == "analysis" {
 					emitThinking(streamEvent.text)
 					if streamEvent.isStop {
-						willContinue := max_tokens && convId != "" && assistantMessageID != ""
-						if writeStream && !willContinue {
+						if streamOutput {
 							finalLine := official_types.StopChunkWithConversation(finish_reason, model, convId)
 							c.Writer.WriteString("data: " + finalLine.String() + "\n\n")
 							c.Writer.Flush()
@@ -484,7 +478,7 @@ readLoop:
 					options.OnTextDelta(deltaText)
 				}
 				var terminalChunk *official_types.ChatCompletionChunk
-				if writeStream {
+				if streamOutput {
 					outChunk := *streamEvent.chunk
 					willContinue := streamEvent.isStop && max_tokens && convId != "" && assistantMessageID != ""
 					if len(outChunk.Choices) > 0 {
@@ -634,7 +628,16 @@ readLoop:
 			if !strings.HasSuffix(original_response.Message.Content.ContentType, "text") {
 				continue
 			}
-			if isEndTurn(original_response.Message.EndTurn) {
+			if original_response.Message.Metadata.MessageType == "" && activeChannel != "final" {
+				continue
+			}
+			if (original_response.Message.Metadata.MessageType != "next" && original_response.Message.Metadata.MessageType != "continue" && activeChannel != "final") || !strings.HasSuffix(original_response.Message.Content.ContentType, "text") {
+				continue
+			}
+			if endTurn, ok := original_response.Message.EndTurn.(bool); ok && endTurn {
+				if waitSource {
+					waitSource = false
+				}
 				isEnd = true
 			}
 			if len(original_response.Message.Metadata.Citations) != 0 {
@@ -704,7 +707,16 @@ readLoop:
 				}
 			}
 			if response_string == "" {
-				response_string = chatgpt.ConvertToString(&original_response, textSnapshot, isRole, model)
+				response_string = chatgpt.ConvertToString(&original_response, &previous_text, isRole, model)
+				if streamOutput && response_string != "" && strings.HasPrefix(response_string, "data: ") {
+					var chunk official_types.ChatCompletionChunk
+					if err := json.Unmarshal([]byte(strings.TrimPrefix(response_string, "data: ")), &chunk); err == nil {
+						delta := chunk.Choices[0].Delta.Content
+						replaced := citePipeline.Feed(patchState.CiteAlts, delta)
+						chunk.Choices[0].Delta.Content = replaced
+						response_string = "data: " + chunk.String() + "\n\n"
+					}
+				}
 			}
 			if response_string == "" {
 				if isEnd {
@@ -728,38 +740,26 @@ readLoop:
 			}
 		endProcess:
 			isRole = false
-			if original_response.Message.Metadata.FinishDetails != nil {
-				finish_reason = original_response.Message.Metadata.FinishDetails.Type
-				max_tokens = isTokenLimitFinish(finish_reason)
-			}
-			willContinue := isEnd && max_tokens && convId != "" && assistantMessageID != ""
-			legacyDelta := chatCompletionDelta(response_string)
-			if shouldDeferHTTPOutput() {
-				deferredHTTPOutput = append(deferredHTTPOutput, deferredLegacyOutput{responseString: response_string, delta: legacyDelta})
-			} else {
-				if legacyDelta != "" {
-					emittedText += legacyDelta
-				}
-				if options.OnTextDelta != nil && legacyDelta != "" {
-					options.OnTextDelta(legacyDelta)
-				}
-				if writeStream {
-					_, err = writeLegacyResponseString(c, response_string)
-					if err != nil {
-						return HandlerResult{}
-					}
+			if streamOutput {
+				_, err = c.Writer.WriteString(response_string)
+				if err != nil {
+					return HandlerResult{}
 				}
 			}
 
-			if isEnd {
-				flushCites()
-				if shouldDeferHTTPOutput() {
-					// Keep reading through [DONE] so the complete WebSocket handoff
-					// can replace this partial HTTP response.
-					currentEvent = ""
-					continue
+			if original_response.Message.Metadata.FinishDetails != nil {
+				finish_reason = original_response.Message.Metadata.FinishDetails.Type
+				if finish_reason == "max_tokens" {
+					max_tokens = true
+					finish_reason = "length"
 				}
-				if writeStream && !willContinue {
+			}
+			if isEnd {
+				if finish_reason == "" {
+					finish_reason = "stop"
+				}
+				flushCites()
+				if streamOutput {
 					final_line := official_types.StopChunkWithConversation(finish_reason, model, convId)
 					c.Writer.WriteString("data: " + final_line.String() + "\n\n")
 					c.Writer.Flush()

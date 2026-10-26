@@ -84,7 +84,35 @@ type ToolFunction struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description,omitempty"`
 	Parameters  json.RawMessage `json:"parameters,omitempty"`
-	// Strict / Cache 暂不实现 —— OpenAI 协议可选字段,ChatGPT Web 不消费
+	Strict      *bool           `json:"strict,omitempty"`
+	// Cache 暂不实现 —— OpenAI 协议可选字段,ChatGPT Web 不消费
+}
+
+// UnmarshalJSON 同时接受 Chat Completions 的嵌套形态和 Responses API 的扁平形态。
+func (t *Tool) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		Type        string          `json:"type"`
+		Function    *ToolFunction   `json:"function"`
+		Name        string          `json:"name"`
+		Description string          `json:"description"`
+		Parameters  json.RawMessage `json:"parameters"`
+		Strict      *bool           `json:"strict"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	t.Type = raw.Type
+	if raw.Function != nil {
+		t.Function = *raw.Function
+		return nil
+	}
+	t.Function = ToolFunction{
+		Name:        raw.Name,
+		Description: raw.Description,
+		Parameters:  raw.Parameters,
+		Strict:      raw.Strict,
+	}
+	return nil
 }
 
 // ToolChoice 取值:
@@ -111,12 +139,19 @@ func (t *ToolChoice) UnmarshalJSON(data []byte) error {
 		t.Function = nil
 		return nil
 	}
-	type alias ToolChoice
-	var a alias
-	if err := json.Unmarshal(data, &a); err != nil {
+	var raw struct {
+		Type     string              `json:"type"`
+		Name     string              `json:"name"`
+		Function *ToolChoiceFunction `json:"function"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
 	}
-	*t = ToolChoice(a)
+	t.Type = raw.Type
+	t.Function = raw.Function
+	if t.Type == "function" && t.Function == nil && raw.Name != "" {
+		t.Function = &ToolChoiceFunction{Name: raw.Name}
+	}
 	return nil
 }
 
@@ -365,10 +400,14 @@ func firstNonEmpty(values ...string) string {
 }
 
 type ResponsesAPIRequest struct {
-	Model        string          `json:"model"`
-	Input        json.RawMessage `json:"input"`
-	Instructions json.RawMessage `json:"instructions"`
-	Stream       bool            `json:"stream"`
+	Model              string          `json:"model"`
+	Input              json.RawMessage `json:"input"`
+	Instructions       json.RawMessage `json:"instructions"`
+	Stream             bool            `json:"stream"`
+	PreviousResponseID string          `json:"previous_response_id,omitempty"`
+	Tools              []Tool          `json:"tools,omitempty"`
+	ToolChoice         *ToolChoice     `json:"tool_choice,omitempty"`
+	ParallelToolCalls  *bool           `json:"parallel_tool_calls,omitempty"`
 
 	// 标准生成参数
 	Temperature     *float64 `json:"temperature,omitempty"`
@@ -396,8 +435,14 @@ type ReasoningConfig struct {
 }
 
 type responseInputMessage struct {
-	Role    string          `json:"role"`
-	Content json.RawMessage `json:"content"`
+	Type      string          `json:"type"`
+	ID        string          `json:"id"`
+	CallID    string          `json:"call_id"`
+	Name      string          `json:"name"`
+	Arguments string          `json:"arguments"`
+	Output    json.RawMessage `json:"output"`
+	Role      string          `json:"role"`
+	Content   json.RawMessage `json:"content"`
 }
 
 type responseInputContent struct {
@@ -405,10 +450,42 @@ type responseInputContent struct {
 	Text string `json:"text"`
 }
 
+func (r *ResponsesAPIRequest) ApplyFunctionCallNames(callNames map[string]string) {
+	if len(callNames) == 0 || len(r.Input) == 0 {
+		return
+	}
+	var items []map[string]interface{}
+	if err := json.Unmarshal(r.Input, &items); err != nil {
+		return
+	}
+	changed := false
+	for _, item := range items {
+		if item["type"] != "function_call_output" {
+			continue
+		}
+		if name, _ := item["name"].(string); name != "" {
+			continue
+		}
+		callID, _ := item["call_id"].(string)
+		if name := callNames[callID]; name != "" {
+			item["name"] = name
+			changed = true
+		}
+	}
+	if changed {
+		if data, err := json.Marshal(items); err == nil {
+			r.Input = data
+		}
+	}
+}
+
 func (r ResponsesAPIRequest) ToAPIRequest() (APIRequest, error) {
 	apiRequest := APIRequest{
-		Model:  r.Model,
-		Stream: r.Stream,
+		Model:             r.Model,
+		Stream:            r.Stream,
+		Tools:             r.Tools,
+		ToolChoice:        r.ToolChoice,
+		ParallelToolCalls: r.ParallelToolCalls,
 	}
 
 	// 透传 Responses 参数到 APIRequest
@@ -476,8 +553,43 @@ func responsesInputToMessages(raw json.RawMessage) ([]APIMessage, error) {
 		return nil, fmt.Errorf("invalid input")
 	}
 
+	callNames := make(map[string]string)
+	for _, message := range messages {
+		if message.Type == "function_call" && message.CallID != "" && message.Name != "" {
+			callNames[message.CallID] = message.Name
+		}
+	}
+
 	result := make([]APIMessage, 0, len(messages))
 	for _, message := range messages {
+		switch message.Type {
+		case "function_call":
+			callID := firstNonEmpty(message.CallID, message.ID)
+			var function struct {
+				Name      string `json:"name"`
+				Arguments string `json:"arguments"`
+			}
+			function.Name = message.Name
+			function.Arguments = message.Arguments
+			result = append(result, APIMessage{
+				Role: "assistant",
+				ToolCalls: []ToolCallRef{{
+					ID:       callID,
+					Type:     "function",
+					Function: function,
+				}},
+			})
+			continue
+		case "function_call_output":
+			result = append(result, APIMessage{
+				Role:       "tool",
+				ToolCallID: message.CallID,
+				Name:       firstNonEmpty(message.Name, callNames[message.CallID]),
+				Content:    MessageContent{TextValue: responseFunctionOutputText(message.Output)},
+			})
+			continue
+		}
+
 		role := message.Role
 		if role == "" {
 			role = "user"
@@ -511,6 +623,30 @@ func responseContentToMessageContent(raw json.RawMessage) (MessageContent, error
 		})
 	}
 	return MessageContent{Parts: messageParts}, nil
+}
+
+func responseFunctionOutputText(raw json.RawMessage) string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return ""
+	}
+	var text string
+	if err := json.Unmarshal(raw, &text); err == nil {
+		return text
+	}
+	var parts []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(raw, &parts); err == nil {
+		texts := make([]string, 0, len(parts))
+		for _, part := range parts {
+			if part.Text != "" {
+				texts = append(texts, part.Text)
+			}
+		}
+		return strings.Join(texts, "\n")
+	}
+	return strings.TrimSpace(string(raw))
 }
 
 func responsesContentToText(raw json.RawMessage) string {

@@ -8,7 +8,9 @@ import (
 	"testing"
 
 	"aurora/internal/accounts"
+	"aurora/internal/chatgpt"
 	"aurora/internal/config"
+	chatgpt_types "aurora/typings/chatgpt"
 	officialtypes "aurora/typings/official"
 
 	"github.com/gin-gonic/gin"
@@ -149,7 +151,107 @@ func TestResolveAccountWithGlobalKey(t *testing.T) {
 	}
 }
 
-// ─── helpers ─────────────────────────────────────────────────────
+func TestApplyClientStateToToolRequest(t *testing.T) {
+	state := chatgpt.NewChatClientState()
+	state.ConversationID = "conv-1"
+	state.ParentMessageID = "msg-1"
+	request := chatgpt_types.NewChatGPTRequest()
+
+	applyClientStateToToolRequest(&request, state)
+
+	if request.ConversationID != "conv-1" || request.ParentMessageID != "msg-1" {
+		t.Fatalf("request state = conv %q parent %q", request.ConversationID, request.ParentMessageID)
+	}
+}
+
+func TestSessionManagerRegistersResponsesState(t *testing.T) {
+	manager := &SessionManager{
+		sessions:         make(map[string]*sessionEntry),
+		responseSessions: make(map[string]*responseSessionEntry),
+		ttl:              defaultSessionTTL,
+	}
+	state := chatgpt.NewChatClientState()
+	state.ConversationID = "conv-1"
+	state.ParentMessageID = "msg-1"
+	manager.RegisterResponse("resp-1", state, map[string]string{"call-1": "bash"})
+
+	gotState, names := manager.GetResponse("resp-1")
+	if gotState == state {
+		t.Fatal("response state should be an immutable snapshot, not the original pointer")
+	}
+	if gotState.ConversationID != state.ConversationID || gotState.ParentMessageID != state.ParentMessageID {
+		t.Fatalf("state = %#v, want %#v", gotState, state)
+	}
+	if names["call-1"] != "bash" {
+		t.Fatalf("call name = %q, want bash", names["call-1"])
+	}
+}
+
+func TestWriteResponsesToolCallingStream(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	writer := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(writer)
+	h := &ChatHandler{}
+	call := officialtypes.ToolCall{
+		ID:   "call_123",
+		Type: "function",
+		Function: officialtypes.ToolCallFunc{
+			Name:      "get_weather",
+			Arguments: `{"city":"Paris"}`,
+		},
+	}
+	response := officialtypes.NewResponsesResponseWithToolCalls("", "", []officialtypes.ToolCall{call}, 10, 5, 0, 0, 0, "gpt-5")
+
+	h.writeResponsesToolCallingStream(c, response, []officialtypes.ToolCall{call})
+
+	body := writer.Body.String()
+	for _, event := range []string{
+		"event: response.created",
+		"event: response.output_item.added",
+		"event: response.function_call_arguments.delta",
+		"event: response.function_call_arguments.done",
+		"event: response.output_item.done",
+		"event: response.completed",
+	} {
+		if !strings.Contains(body, event) {
+			t.Fatalf("missing %q in %s", event, body)
+		}
+	}
+	if strings.Contains(body, "chat.completion.chunk") || strings.Contains(body, `"choices"`) {
+		t.Fatalf("Responses stream contains Chat Completions payload: %s", body)
+	}
+	if strings.Contains(body, "data: [DONE]") {
+		t.Fatalf("Responses stream should end with response.completed, not [DONE]: %s", body)
+	}
+	if strings.Count(body, response.ID) < 2 {
+		t.Fatalf("response id %q was not reused across created/completed: %s", response.ID, body)
+	}
+}
+
+func TestWriteResponsesToolCallingStreamWithFinalText(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	writer := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(writer)
+	h := &ChatHandler{}
+	response := officialtypes.NewResponsesResponse("done", "", 10, 5, 0, 0, 0, "gpt-5")
+
+	h.writeResponsesToolCallingStream(c, response, nil)
+
+	body := writer.Body.String()
+	for _, event := range []string{
+		"event: response.output_item.added",
+		"event: response.output_text.delta",
+		"event: response.output_item.done",
+		"event: response.completed",
+	} {
+		if !strings.Contains(body, event) {
+			t.Fatalf("missing %q in %s", event, body)
+		}
+	}
+	if !strings.Contains(body, `"text":"done"`) {
+		t.Fatalf("final text message missing: %s", body)
+	}
+}
 
 func sseDataLines(output string) []string {
 	var lines []string

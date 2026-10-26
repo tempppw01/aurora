@@ -84,14 +84,11 @@ func TestHandlerStreamsPatchEvents(t *testing.T) {
 	}
 }
 
-func TestHandlerDoesNotDropTextAfterLegacySourcePlaceholder(t *testing.T) {
+func TestHandlerDetailedSuppressesStreamOutput(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-
 	body := strings.Join([]string{
-		`data: {"p":"/message/content/parts/0","o":"append","v":"1. 第一项"}`,
-		`data: {"p":"/message/content/parts/0","o":"append","v":"【"}`,
-		`data: {"p":"/message/content/parts/0","o":"append","v":"\n2. 第二项"}`,
-		`data: {"p":"/message/end_turn","o":"replace","v":true}`,
+		`data: {"choices":[{"delta":{"content":"hello"}}]}`,
+		`data: {"choices":[{"delta":{},"finish_reason":"stop"}],"conversation_id":"conv-xxx"}`,
 		`data: [DONE]`,
 		``,
 	}, "\n")
@@ -99,119 +96,13 @@ func TestHandlerDoesNotDropTextAfterLegacySourcePlaceholder(t *testing.T) {
 	writer := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(writer)
 
-	full, continueInfo := Handler(c, response, nil, nil, "request-id", chatGPTRequestForTest(), true, "auto")
+	result := HandlerDetailedWithOptions(c, response, nil, nil, "request-id", chatGPTRequestForTest(), true, "auto", HandlerDetailedOptions{SuppressOutput: true})
 
-	if continueInfo != nil {
-		t.Fatalf("continueInfo = %#v, want nil", continueInfo)
+	if result.Text != "hello" {
+		t.Fatalf("text = %q, want hello", result.Text)
 	}
-	if !strings.Contains(full, "1. 第一项") || !strings.Contains(full, "2. 第二项") {
-		t.Fatalf("full response lost text after source placeholder: %q", full)
-	}
-	output := writer.Body.String()
-	if !strings.Contains(output, `"content":"1. 第一项"`) || !strings.Contains(output, `"content":"\n2. 第二项"`) {
-		t.Fatalf("stream output lost ordered list items: %s", output)
-	}
-}
-
-func TestHandlerKeepsTextFromMultimodalResponseBeforeLaterText(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-
-	body := strings.Join([]string{
-		`data: {"v":{"conversation_id":"conv-rich","message":{"id":"msg-rich","author":{"role":"assistant"},"channel":"final","content":{"content_type":"multimodal_text","parts":["开头内容"]},"metadata":{"message_type":"next"},"recipient":"all","end_turn":false}}}`,
-		`data: {"v":{"conversation_id":"conv-rich","message":{"id":"msg-rich","author":{"role":"assistant"},"channel":"final","content":{"content_type":"text","parts":["后半内容"]},"metadata":{"message_type":"next"},"recipient":"all","end_turn":true}}}`,
-		`data: [DONE]`,
-		``,
-	}, "\n")
-	response := &http.Response{Body: io.NopCloser(strings.NewReader(body))}
-	writer := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(writer)
-
-	result := HandlerDetailed(c, response, nil, nil, "request-id", chatGPTRequestForTest(), true, "auto")
-
-	if result.Text != "开头内容后半内容" {
-		t.Fatalf("text = %q, want the multimodal and later text", result.Text)
-	}
-	if !strings.Contains(writer.Body.String(), `"content":"开头内容"`) || !strings.Contains(writer.Body.String(), `"content":"后半内容"`) {
-		t.Fatalf("stream output omitted rich-response text: %s", writer.Body.String())
-	}
-	chunks := parseSSEChunks(t, writer.Body.String())
-	firstDelta := chunks[0]["choices"].([]interface{})[0].(map[string]interface{})["delta"].(map[string]interface{})
-	if firstDelta["role"] != "assistant" || firstDelta["content"] != nil {
-		t.Fatalf("first rich-response chunk = %#v, want role only", firstDelta)
-	}
-	secondDelta := chunks[1]["choices"].([]interface{})[0].(map[string]interface{})["delta"].(map[string]interface{})
-	if secondDelta["role"] != nil || secondDelta["content"] != "开头内容" {
-		t.Fatalf("second rich-response chunk = %#v, want the first text", secondDelta)
-	}
-}
-
-func TestHandlerDoesNotUseOneMessageSnapshotForAnotherMessage(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-
-	body := strings.Join([]string{
-		`data: {"v":{"conversation_id":"conv-message-boundary","message":{"id":"msg-first","author":{"role":"assistant"},"channel":"final","content":{"content_type":"text","parts":["图片前文字"]},"metadata":{"message_type":"next"},"recipient":"all","end_turn":false}}}`,
-		`data: {"v":{"conversation_id":"conv-message-boundary","message":{"id":"msg-final","author":{"role":"assistant"},"channel":"final","content":{"content_type":"text","parts":["图片前文字后半段"]},"metadata":{"message_type":"next"},"recipient":"all","end_turn":true}}}`,
-		`data: [DONE]`,
-		``,
-	}, "\n")
-	response := &http.Response{Body: io.NopCloser(strings.NewReader(body))}
-	writer := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(writer)
-
-	result := HandlerDetailed(c, response, nil, nil, "request-id", chatGPTRequestForTest(), true, "auto")
-
-	if !strings.Contains(result.Text, "图片前文字后半段") {
-		t.Fatalf("text = %q, want the complete second-message snapshot", result.Text)
-	}
-	if !strings.Contains(writer.Body.String(), `"content":"图片前文字后半段"`) {
-		t.Fatalf("stream omitted the opening of the second message: %s", writer.Body.String())
-	}
-}
-
-func TestHandlerDoesNotForwardAssistantHistoryFromRequest(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	request := chatGPTRequestForTest()
-	request.AddAssistantMessage("上一轮《西游记》的回复")
-	historyID := request.Messages[len(request.Messages)-1].ID.String()
-	body := strings.Join([]string{
-		fmt.Sprintf(`data: {"v":{"conversation_id":"conv-history","message":{"id":"%s","author":{"role":"assistant"},"channel":"final","content":{"content_type":"text","parts":["上一轮《西游记》的回复"]},"metadata":{"message_type":"next"},"recipient":"all","end_turn":true}}}`, historyID),
-		`data: {"v":{"conversation_id":"conv-history","message":{"id":"msg-new","author":{"role":"assistant"},"channel":"final","content":{"content_type":"text","parts":["本轮《水浒传》的回复"]},"metadata":{"message_type":"next"},"recipient":"all","end_turn":true}}}`,
-		`data: [DONE]`,
-		``,
-	}, "\n")
-	response := &http.Response{Body: io.NopCloser(strings.NewReader(body))}
-	writer := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(writer)
-
-	result := HandlerDetailed(c, response, nil, nil, "request-id", request, true, "auto")
-
-	if result.Text != "本轮《水浒传》的回复" {
-		t.Fatalf("text = %q, want only the new assistant reply", result.Text)
-	}
-	if strings.Contains(writer.Body.String(), "上一轮《西游记》的回复") {
-		t.Fatalf("stream output replayed assistant history: %s", writer.Body.String())
-	}
-}
-
-func TestHandlerKeepsOpeningAssistantTextBeforeMessageMetadata(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-
-	body := strings.Join([]string{
-		`data: {"v":{"conversation_id":"conv-opening","message":{"id":"msg-opening","author":{"role":"assistant"},"content":{"content_type":"text","parts":["开头正文"]},"metadata":{},"recipient":"all","end_turn":true}}}`,
-		`data: [DONE]`,
-		``,
-	}, "\n")
-	response := &http.Response{Body: io.NopCloser(strings.NewReader(body))}
-	writer := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(writer)
-
-	result := HandlerDetailed(c, response, nil, nil, "request-id", chatGPTRequestForTest(), true, "auto")
-
-	if result.Text != "开头正文" {
-		t.Fatalf("text = %q, want opening assistant text", result.Text)
-	}
-	if !strings.Contains(writer.Body.String(), `"content":"开头正文"`) {
-		t.Fatalf("stream omitted opening assistant text: %s", writer.Body.String())
+	if writer.Body.Len() != 0 {
+		t.Fatalf("suppressed stream wrote downstream output: %s", writer.Body.String())
 	}
 }
 

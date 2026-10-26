@@ -12,15 +12,11 @@ import (
 	"aurora/internal/accounts"
 )
 
-// Model 是上游 /backend-api/models 返回的原始条目。
-// Slug 是网页端实际接受的模型标识，ID 作为 Slug 缺失时的兜底。
 type Model struct {
-	ID   string `json:"id"`
 	Slug string `json:"slug"`
 }
 
-// ListModels 获取当前登录账号可见的网页模型。
-// 需要登录态账号（free / paid），匿名设备账号拿不到该接口。
+// ListModels 获取当前登录账号可见的网页模型，不添加静态别名。
 func ListModels(client httpclient.AuroraHttpClient, account *accounts.Account) ([]Model, int, error) {
 	if account == nil || account.Type == accounts.TypeNoAuth || account.Token == "" {
 		return nil, http.StatusForbidden, errors.New("model listing requires a logged-in ChatGPT account")

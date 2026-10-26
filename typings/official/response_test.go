@@ -90,24 +90,64 @@ func TestResponsesOutputItemEvents(t *testing.T) {
 	}
 }
 
-func TestImageGenerationResponseReportsImageUsage(t *testing.T) {
-	response := NewImageGenerationResponse([]ImageGenerationData{{URL: "https://example.test/image.png"}}, 12)
-	data, err := json.Marshal(response)
-	if err != nil {
-		t.Fatalf("marshal image response: %v", err)
+func TestNewResponsesResponseWithToolCalls(t *testing.T) {
+	calls := []ToolCall{{
+		ID:   "call_123",
+		Type: "function",
+		Function: ToolCallFunc{
+			Name:      "get_weather",
+			Arguments: `{"city":"Paris"}`,
+		},
+	}}
+
+	resp := NewResponsesResponseWithToolCalls("ignored", "", calls, 10, 5, 0, 0, 0, "gpt-5")
+	if resp.OutputText != "" {
+		t.Fatalf("output_text = %q, want empty", resp.OutputText)
 	}
-	for _, want := range []string{
-		`"status":"completed"`,
-		`"images_generated":1`,
-		`"prompt_tokens":12`,
-		`"completion_tokens":1000`,
-		`"total_tokens":1012`,
-		`"usage_estimated":true`,
-		`"url":"https://example.test/image.png"`,
-	} {
-		if !strings.Contains(string(data), want) {
-			t.Fatalf("missing %q in %s", want, data)
-		}
+	if len(resp.Output) != 1 {
+		t.Fatalf("output len = %d, want 1", len(resp.Output))
+	}
+	item := resp.Output[0]
+	if item.Type != "function_call" || item.CallID != "call_123" || item.Name != "get_weather" || item.Arguments != `{"city":"Paris"}` {
+		t.Fatalf("function call item = %#v", item)
+	}
+}
+
+func TestResponsesFunctionCallStreamEvents(t *testing.T) {
+	call := ToolCall{
+		ID:   "call_123",
+		Type: "function",
+		Function: ToolCallFunc{
+			Name:      "get_weather",
+			Arguments: `{"city":"Paris"}`,
+		},
+	}
+
+	added := ResponsesFunctionCallAddedEvent(0, "fc_123", call)
+	if added.Item.Type != "function_call" || added.Item.CallID != "call_123" || added.Item.Name != "get_weather" || added.Item.Arguments != "" {
+		t.Fatalf("added item = %#v", added.Item)
+	}
+	delta := ResponsesFunctionCallArgumentsDeltaEvent(0, "fc_123", call.Function.Arguments)
+	if delta.Type != "response.function_call_arguments.delta" || delta.Delta != call.Function.Arguments {
+		t.Fatalf("delta event = %#v", delta)
+	}
+	done := ResponsesFunctionCallArgumentsDoneEvent(0, "fc_123", call)
+	if done.CallID != "call_123" || done.Name != "get_weather" || done.Arguments != call.Function.Arguments {
+		t.Fatalf("done event = %#v", done)
+	}
+	itemDone := ResponsesFunctionCallDoneEvent(0, "fc_123", call)
+	if itemDone.Item.Status != "completed" || itemDone.Item.Arguments != call.Function.Arguments {
+		t.Fatalf("item done event = %#v", itemDone)
+	}
+}
+
+func TestNewResponsesResponseWithoutReasoning(t *testing.T) {
+	resp := NewResponsesResponse("hi", "", 10, 5, 0, 0, 0, "auto")
+	if len(resp.Output) != 1 {
+		t.Fatalf("output len = %d, want 1", len(resp.Output))
+	}
+	if resp.Status != "completed" || resp.Usage.InputTokens != 10 || resp.Usage.OutputTokens != 5 || resp.Usage.TotalTokens != 15 {
+		t.Fatalf("unexpected response usage/status: %#v", resp)
 	}
 }
 

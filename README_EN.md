@@ -10,7 +10,7 @@ For full endpoints, authentication, token exchange, and curl examples, see: [API
 
 - OpenAI-style `/v1/chat/completions` with streaming and non-streaming support, including parameters such as `temperature`/`top_p`/`max_tokens`/`stop`/`reasoning_effort`/`response_format`/`stream_options.include_usage`.
 - Tool Calling emulation — ChatGPT Web does not natively support function calling. Aurora emulates it via a `<tool_call>` text protocol, supporting `tools`/`tool_choice` fields, automatically injecting the calling convention into the system prompt and parsing `<tool_call>` blocks in model output into standard OpenAI-format `tool_calls`.
-- OpenAI-style `/v1/responses` with string input, message arrays, `instructions`, streaming events, and parameters such as `reasoning.effort`/`text.query.format`/`temperature`.
+- OpenAI-style `/v1/responses` with string input, message arrays, `instructions`, streaming events, `previous_response_id` continuation, and Responses-format tool calling, plus parameters such as `reasoning.effort`/`text.query.format`/`temperature`.
 - `/v1/files` for file uploads; after uploading, you can include `file_id` in chat or Responses requests for file-based Q&A.
 - `/v1/images/generations` for image generation; the model list includes `gpt-image-2.5`, supports SSE streaming, and can return either URLs or `b64_json`.
 - `/v1/images/edits` for image editing and `/v1/images/variations` for image-to-image generation (variations).
