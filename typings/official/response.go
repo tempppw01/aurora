@@ -609,10 +609,17 @@ type ImageGenerationData struct {
 	RevisedPrompt string `json:"revised_prompt,omitempty"`
 }
 
-func NewImageGenerationResponse(data []ImageGenerationData) ImageGenerationResponse {
+func NewImageGenerationResponse(data []ImageGenerationData, promptTokenCounts ...int) ImageGenerationResponse {
+	promptTokens := 1
+	if len(promptTokenCounts) > 0 {
+		promptTokens = promptTokenCounts[0]
+	}
 	return ImageGenerationResponse{
-		Created: 0,
-		Data:    data,
+		Created:        0,
+		Data:           data,
+		Status:         "completed",
+		Usage:          EstimatedImageUsage(data, promptTokens),
+		UsageEstimated: len(data) > 0,
 	}
 }
 
@@ -620,10 +627,17 @@ func NewImageGenerationResponse(data []ImageGenerationData) ImageGenerationRespo
 // 用于 /v1/images/edits 接口,保持 OpenAI 官方响应兼容。
 type ImageEditResponse = ImageGenerationResponse
 
-func NewImageEditResponse(data []ImageGenerationData) ImageEditResponse {
+func NewImageEditResponse(data []ImageGenerationData, promptTokenCounts ...int) ImageEditResponse {
+	promptTokens := 1
+	if len(promptTokenCounts) > 0 {
+		promptTokens = promptTokenCounts[0]
+	}
 	return ImageEditResponse{
-		Created: 0,
-		Data:    data,
+		Created:        0,
+		Data:           data,
+		Status:         "completed",
+		Usage:          EstimatedImageUsage(data, promptTokens),
+		UsageEstimated: len(data) > 0,
 	}
 }
 
@@ -631,10 +645,17 @@ func NewImageEditResponse(data []ImageGenerationData) ImageEditResponse {
 // 用于 /v1/images/variations 接口,保持 OpenAI 官方响应兼容。
 type ImageVariationResponse = ImageGenerationResponse
 
-func NewImageVariationResponse(data []ImageGenerationData) ImageVariationResponse {
+func NewImageVariationResponse(data []ImageGenerationData, promptTokenCounts ...int) ImageVariationResponse {
+	promptTokens := 1
+	if len(promptTokenCounts) > 0 {
+		promptTokens = promptTokenCounts[0]
+	}
 	return ImageVariationResponse{
-		Created: 0,
-		Data:    data,
+		Created:        0,
+		Data:           data,
+		Status:         "completed",
+		Usage:          EstimatedImageUsage(data, promptTokens),
+		UsageEstimated: len(data) > 0,
 	}
 }
 

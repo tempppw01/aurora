@@ -36,6 +36,7 @@ type conversationStreamEvent struct {
 	role           string
 	conversationID string
 	messageID      string
+	wrapped        bool
 	channel        string
 	finishReason   string
 	isStop         bool
@@ -80,7 +81,7 @@ func parseConversationEvent(line string, state *sseparser.PatchState, model stri
 		if channel := sseparser.ChannelFromValue(raw["v"]); channel != "" {
 			state.Channel = channel
 		}
-		return conversationStreamEvent{response: state.Response, messageID: state.Response.Message.ID, channel: state.Channel}, true
+		return conversationStreamEvent{response: state.Response, messageID: state.Response.Message.ID, channel: state.Channel, wrapped: true}, true
 	}
 	if text, ok := raw["v"].(string); ok && raw["p"] == nil && raw["o"] == nil {
 		sseparser.EnsurePatchDefaults(state)
@@ -156,15 +157,20 @@ func HandlerDetailedWithWebsocket(c *gin.Context, response *http.Response, clien
 
 // HandlerDetailedOptions 是 HandlerDetailedWithOptions 的可选参数。
 type HandlerDetailedOptions struct {
-	Websocket            *websocket.Conn
-	ClientState          *ChatClientState
-	ArtifactDelivery     string
-	ProxyURL             string
-	Tools                []official_types.Tool
+	Websocket        *websocket.Conn
+	ClientState      *ChatClientState
+	ArtifactDelivery string
+	ProxyURL         string
+	Tools            []official_types.Tool
+	// SuppressStreamOutput keeps parsing an upstream stream but leaves writing
+	// to the caller. It is used by /v1/responses, whose SSE event shape differs
+	// from Chat Completions.
 	SuppressStreamOutput bool
 	SuppressOutput       bool
 	OnTextDelta          func(string)
-	OnThinkingDelta      func(string)
+	// OnThinkingDelta lets protocol adapters expose reasoning without changing
+	// the Chat Completions stream shape.
+	OnThinkingDelta func(string)
 }
 
 // HandlerDetailedWithOptions 处理对话响应流（最完整版）。
@@ -177,7 +183,7 @@ func HandlerDetailedWithOptions(c *gin.Context, response *http.Response, client 
 		options.ClientState.ApplyToRequest(&translated_request)
 	}
 	max_tokens := false
-	writeStream := stream && !options.SuppressStreamOutput
+	writeStream := stream && !options.SuppressStreamOutput && !options.SuppressOutput
 
 	reader := bufio.NewReader(response.Body)
 	if wsConn != nil {
@@ -193,8 +199,7 @@ func HandlerDetailedWithOptions(c *gin.Context, response *http.Response, client 
 		}
 	}
 
-	streamOutput := stream && !options.SuppressStreamOutput && !options.SuppressOutput
-	if streamOutput {
+	if stream {
 		c.Header("Content-Type", "text/event-stream")
 		c.Header("Cache-Control", "no-cache")
 		c.Header("Connection", "keep-alive")
@@ -203,6 +208,7 @@ func HandlerDetailedWithOptions(c *gin.Context, response *http.Response, client 
 		c.Header("Content-Type", "application/json")
 	}
 	var finish_reason string
+	var stopSentAtEnd bool
 	var previous_text typings.StringStruct
 	var citePipeline sseparser.CiteStreamPipeline
 	var visibleChunkText strings.Builder
@@ -228,7 +234,6 @@ func HandlerDetailedWithOptions(c *gin.Context, response *http.Response, client 
 	var emittedText string
 	var activeChannel string
 	var assistantMessageID string
-	var waitSource bool
 	visibleText := func() string {
 		if usedChunkEvents {
 			return strings.Join(imgSource, "") + visibleChunkText.String()
@@ -243,6 +248,9 @@ func HandlerDetailedWithOptions(c *gin.Context, response *http.Response, client 
 	var readingWebsocket bool
 	var websocketStream io.ReadCloser
 	var deferredHTTPOutput []deferredLegacyOutput
+	shouldDeferHTTPOutput := func() bool {
+		return !readingWebsocket && handoffTopicID != "" && wsConn != nil
+	}
 	flushDeferredHTTPOutput := func() error {
 		for _, output := range deferredHTTPOutput {
 			if output.delta != "" {
@@ -265,7 +273,7 @@ func HandlerDetailedWithOptions(c *gin.Context, response *http.Response, client 
 			return
 		}
 		sentinel = append(sentinel, items...)
-		if !streamOutput {
+		if !writeStream {
 			return
 		}
 		for _, item := range items {
@@ -308,7 +316,7 @@ func HandlerDetailedWithOptions(c *gin.Context, response *http.Response, client 
 			"kind":  "analysis",
 			"delta": delta,
 		}})
-		if streamOutput {
+		if writeStream {
 			reasoningChunk := official_types.NewReasoningChunk(delta, model)
 			if convId != "" {
 				reasoningChunk.ConversationID = convId
@@ -325,11 +333,10 @@ func HandlerDetailedWithOptions(c *gin.Context, response *http.Response, client 
 		if flushed == "" {
 			return
 		}
-		if streamOutput {
-			flushChunk := official_types.NewChatCompletionChunk(flushed, model)
-			flushChunk.ConversationID = convId
-			c.Writer.WriteString("data: " + flushChunk.String() + "\n\n")
-			c.Writer.Flush()
+		if writeStream {
+			chunk := official_types.NewChatCompletionChunk(flushed, model)
+			chunk.ConversationID = convId
+			_ = writeChatCompletionChunk(c, chunk)
 		}
 		if usedChunkEvents {
 			visibleChunkText.WriteString(flushed)
@@ -382,6 +389,17 @@ readLoop:
 				if err := flushDeferredHTTPOutput(); err != nil {
 					return HandlerResult{}
 				}
+				if isEnd && writeStream && !stopSentAtEnd {
+					if finish_reason == "" {
+						finish_reason = "stop"
+					}
+					finalLine := official_types.StopChunkWithConversation(finish_reason, model, convId)
+					if _, err := c.Writer.WriteString("data: " + finalLine.String() + "\n\n"); err != nil {
+						return HandlerResult{}
+					}
+					c.Writer.Flush()
+					stopSentAtEnd = true
+				}
 				finalizeArtifacts()
 				break readLoop
 			}
@@ -431,11 +449,11 @@ readLoop:
 					}
 					isEnd = true
 				}
-				willContinue := streamEvent.isStop && max_tokens && convId != "" && assistantMessageID != ""
 				if activeChannel == "analysis" {
 					emitThinking(streamEvent.text)
 					if streamEvent.isStop {
-						if streamOutput {
+						willContinue := max_tokens && convId != "" && assistantMessageID != ""
+						if writeStream && !willContinue {
 							finalLine := official_types.StopChunkWithConversation(finish_reason, model, convId)
 							c.Writer.WriteString("data: " + finalLine.String() + "\n\n")
 							c.Writer.Flush()
@@ -480,8 +498,9 @@ readLoop:
 					options.OnTextDelta(deltaText)
 				}
 				var terminalChunk *official_types.ChatCompletionChunk
-				if streamOutput {
+				if writeStream {
 					outChunk := *streamEvent.chunk
+					willContinue := streamEvent.isStop && max_tokens && convId != "" && assistantMessageID != ""
 					if len(outChunk.Choices) > 0 {
 						outChunk.Choices[0].Delta.Content = deltaText
 						if willContinue {
@@ -580,6 +599,9 @@ readLoop:
 				c.JSON(500, gin.H{"error": original_response.Error})
 				return HandlerResult{}
 			}
+			if streamEvent.wrapped {
+				isEnd = isEndTurn(original_response.Message.EndTurn)
+			}
 			sentinel = append(sentinel, sseparser.SentinelsFromResponse(original_response)...)
 			if original_response.ConversationID != convId {
 				if convId == "" {
@@ -629,17 +651,15 @@ readLoop:
 			if !strings.HasSuffix(original_response.Message.Content.ContentType, "text") {
 				continue
 			}
-			if original_response.Message.Metadata.MessageType == "" && activeChannel != "final" {
-				continue
-			}
-			if (original_response.Message.Metadata.MessageType != "next" && original_response.Message.Metadata.MessageType != "continue" && activeChannel != "final") || !strings.HasSuffix(original_response.Message.Content.ContentType, "text") {
-				continue
-			}
-			if endTurn, ok := original_response.Message.EndTurn.(bool); ok && endTurn {
-				if waitSource {
-					waitSource = false
-				}
+			if isEndTurn(original_response.Message.EndTurn) {
 				isEnd = true
+			}
+			if details := original_response.Message.Metadata.FinishDetails; details != nil && details.Type != "" {
+				finish_reason = details.Type
+				max_tokens = isTokenLimitFinish(finish_reason)
+				if max_tokens {
+					finish_reason = "length"
+				}
 			}
 			if len(original_response.Message.Metadata.Citations) != 0 {
 				r := []rune(original_response.Message.Content.Parts[0].(string))
@@ -708,23 +728,10 @@ readLoop:
 				}
 			}
 			if response_string == "" {
-				response_string = chatgpt.ConvertToString(&original_response, &previous_text, isRole, model)
-				if streamOutput && response_string != "" && strings.HasPrefix(response_string, "data: ") {
-					var chunk official_types.ChatCompletionChunk
-					if err := json.Unmarshal([]byte(strings.TrimPrefix(response_string, "data: ")), &chunk); err == nil {
-						delta := chunk.Choices[0].Delta.Content
-						replaced := citePipeline.Feed(patchState.CiteAlts, delta)
-						chunk.Choices[0].Delta.Content = replaced
-						response_string = "data: " + chunk.String() + "\n\n"
-					}
-				}
+				response_string = chatgpt.ConvertToString(&original_response, textSnapshot, isRole, model)
 			}
-			if response_string == "" {
-				if isEnd {
-					goto endProcess
-				} else {
-					continue
-				}
+			if response_string == "" && !isEnd {
+				continue
 			}
 			if response_string == "【" {
 				// The legacy web stream emits this as a source-loading sentinel.
@@ -739,34 +746,51 @@ readLoop:
 					response_string = "data: " + chunk.String() + "\n\n"
 				}
 			}
-		endProcess:
 			isRole = false
-			if streamOutput {
-				_, err = c.Writer.WriteString(response_string)
-				if err != nil {
-					return HandlerResult{}
-				}
-			}
-
 			if original_response.Message.Metadata.FinishDetails != nil {
 				finish_reason = original_response.Message.Metadata.FinishDetails.Type
-				if finish_reason == "max_tokens" {
-					max_tokens = true
+				max_tokens = isTokenLimitFinish(finish_reason)
+				if max_tokens {
 					finish_reason = "length"
 				}
 			}
+			willContinue := max_tokens && convId != "" && assistantMessageID != "" && (!isEnd || streamEvent.wrapped)
+			legacyDelta := chatCompletionDelta(response_string)
+			if shouldDeferHTTPOutput() {
+				deferredHTTPOutput = append(deferredHTTPOutput, deferredLegacyOutput{responseString: response_string, delta: legacyDelta})
+			} else {
+				if legacyDelta != "" {
+					emittedText += legacyDelta
+				}
+				if options.OnTextDelta != nil && legacyDelta != "" {
+					options.OnTextDelta(legacyDelta)
+				}
+				if writeStream {
+					_, err = writeLegacyResponseString(c, response_string)
+					if err != nil {
+						return HandlerResult{}
+					}
+				}
+			}
+
 			if isEnd {
 				if finish_reason == "" {
 					finish_reason = "stop"
 				}
 				flushCites()
-				if streamOutput {
+				if shouldDeferHTTPOutput() {
+					// Keep reading through [DONE] so the complete WebSocket handoff
+					// can replace this partial HTTP response.
+					currentEvent = ""
+					continue
+				}
+				stopSent := writeStream && !willContinue
+				if stopSent {
 					final_line := official_types.StopChunkWithConversation(finish_reason, model, convId)
 					c.Writer.WriteString("data: " + final_line.String() + "\n\n")
 					c.Writer.Flush()
 				}
 				finalizeArtifacts()
-				willContinue := max_tokens && convId != "" && assistantMessageID != ""
 				if willContinue {
 					return HandlerResult{
 						Text:              visibleText(),
@@ -794,7 +818,7 @@ readLoop:
 					SandboxArtifacts:  artifactState.SandboxArtifacts,
 					PDFArtifacts:      artifactState.PDFArtifacts,
 					GeneratedImageIDs: artifactState.ImageFileIDs,
-					StopSent:          writeStream,
+					StopSent:          stopSent,
 				}
 			}
 			currentEvent = ""
@@ -819,6 +843,7 @@ readLoop:
 			SandboxArtifacts:  artifactState.SandboxArtifacts,
 			PDFArtifacts:      artifactState.PDFArtifacts,
 			GeneratedImageIDs: artifactState.ImageFileIDs,
+			StopSent:          stopSentAtEnd,
 		}
 	}
 	finalizeArtifacts()

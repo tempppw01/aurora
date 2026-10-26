@@ -90,7 +90,6 @@ func (h *ChatHandler) Nightmare(c *gin.Context) {
 
 	// 工具调用模式判定
 	toolsEnabled := toolCallingEnabled(original_request.Tools, h.cfg)
-	toolStream := toolsEnabled && original_request.Stream && h.cfg.StreamMode
 	if toolsEnabled && h.cfg.StreamMode {
 		// Tool-call tags must be fully parsed before they can be emitted as
 		// OpenAI deltas, so keep the upstream request buffered while preserving
@@ -119,7 +118,7 @@ func (h *ChatHandler) Nightmare(c *gin.Context) {
 
 	// 工具调用提前分支
 	if toolsEnabled {
-		h.handleToolCalling(c, &original_request, &client, account, &clientState, &reqModel, &uid, &proxyUrl, &input_tokens, toolStream)
+		h.handleToolCalling(c, &original_request, &client, account, &clientState, &reqModel, &uid, &proxyUrl, &input_tokens)
 		return
 	}
 
@@ -375,131 +374,22 @@ func (h *ChatHandler) Responses(c *gin.Context) {
 	// 提取 instructions / input 用于缓存模拟
 	var instructions string
 	var inputTextParts []string
-	for _, message := range original_request.Messages {
-		if message.Role == "system" {
-			instructions += message.Text()
+	for _, msg := range original_request.Messages {
+		if msg.Role == "system" {
+			instructions += msg.Text()
 		} else {
-			inputTextParts = append(inputTextParts, message.Text())
+			inputTextParts = append(inputTextParts, msg.Text())
 		}
 	}
-	cacheWriteTokens, cachedTokens := RecordCache(
-		translated_request.ConversationID,
-		instructions,
-		strings.Join(inputTextParts, "\n"),
-	)
+	inputText := strings.Join(inputTextParts, "\n")
+	cacheWriteTokens, cachedTokens := RecordCache(translated_request.ConversationID, instructions, inputText)
 
-	streamResponses := responsesRequest.Stream && h.cfg.StreamMode
-	startedAt := time.Now()
-	responseID := "resp_" + uuid.NewString()
-	reasoningItemID := "rs_" + uuid.NewString()
-	messageItemID := "msg_" + uuid.NewString()
-	response, wsConn, _, status, err := conversationClientOrder(&client, account, translated_request, proxyUrl, streamResponses, clientState, h.accountPool)
-	if err != nil {
-		c.JSON(status, gin.H{"error": gin.H{
-			"message": err.Error(),
-			"type":    "request_conversion_error",
-			"param":   "model",
-			"code":    "request_conversion_error",
-		}})
-		return
-	}
-	defer response.Body.Close()
-	if chatgpt.Handle_request_error(c, response) {
-		if wsConn != nil {
-			wsConn.Close()
-			wsConn = nil
-		}
-		return
-	}
-	if streamResponses {
-		c.Writer.Header().Set("Content-Type", "text/event-stream")
-		c.Writer.Header().Set("Cache-Control", "no-cache")
-		c.Writer.Header().Set("Connection", "keep-alive")
-		c.Writer.Header().Set("X-Accel-Buffering", "no")
-		c.Writer.WriteHeader(200)
-		created := officialtypes.NewResponsesResponse("", "", input_tokens, 0, 0, cachedTokens, cacheWriteTokens, reqModel)
-		created.ID = responseID
-		created.Status = "in_progress"
-		created.Output = nil
-		writeResponsesStreamEvent(c, "response.created", officialtypes.ResponsesCreated(created))
-	}
+	streamRequested := responsesRequest.Stream && h.cfg.StreamMode
 
-	var full_response string
-	var full_thinking string
-	reasoningAdded, messageAdded := false, false
-	reasoningIndex, messageIndex := 0, 0
-	firstOutputAt := int64(0)
-	ensureReasoningItem := func() {
-		if !streamResponses || reasoningAdded {
-			return
-		}
-		if messageAdded {
-			reasoningIndex = 1
-		} else {
-			messageIndex = 1
-		}
-		reasoningAdded = true
-		writeResponsesStreamEvent(c, "response.output_item.added", officialtypes.ResponsesOutputItemAdded(reasoningIndex, reasoningItemID, "reasoning"))
-	}
-	ensureMessageItem := func() {
-		if !streamResponses || messageAdded {
-			return
-		}
-		if reasoningAdded {
-			messageIndex = 1
-		}
-		messageAdded = true
-		writeResponsesStreamEvent(c, "response.output_item.added", officialtypes.ResponsesOutputItemAdded(messageIndex, messageItemID, "message"))
-	}
-	for i := h.cfg.MaxContinueCount; i > 0; i-- {
-		var continue_info *chatgpt.ContinueInfo
-		var response_part string
-		result := chatgpt.HandlerDetailedWithOptions(c, response, client, account, uid, translated_request, streamResponses, reqModel, chatgpt.HandlerDetailedOptions{
-			Websocket:            wsConn,
-			ClientState:          clientState,
-			SuppressStreamOutput: streamResponses,
-			OnTextDelta: func(delta string) {
-				ensureMessageItem()
-				if firstOutputAt == 0 {
-					firstOutputAt = time.Since(startedAt).Milliseconds()
-				}
-				writeResponsesStreamEvent(c, "response.output_text.delta", officialtypes.ResponsesTextDeltaEvent{Type: "response.output_text.delta", ItemID: messageItemID, OutputIndex: messageIndex, ContentIndex: 0, Delta: delta}.String())
-			},
-			OnThinkingDelta: func(delta string) {
-				ensureReasoningItem()
-				if firstOutputAt == 0 {
-					firstOutputAt = time.Since(startedAt).Milliseconds()
-				}
-				writeResponsesStreamEvent(c, "response.reasoning_text.delta", officialtypes.ResponsesReasoningDeltaEvent{Type: "response.reasoning_text.delta", ItemID: reasoningItemID, OutputIndex: reasoningIndex, ContentIndex: 0, Delta: delta}.String())
-			},
-		})
-		wsConn = nil
-		response_part, continue_info = result.Text, result.Continue
-		full_response += response_part
-		full_thinking += result.ThinkingText
-		parentMessageID := result.ParentMessageID
-		if continue_info != nil {
-			parentMessageID = continue_info.ParentID
-		}
-		clientState.NoteTurnResult(result.ConversationID, parentMessageID)
-		if result.ConversationID != "" {
-			h.sessions.Register(result.ConversationID, clientState)
-		}
-		if continue_info == nil {
-			break
-		}
-		translated_request.Messages = nil
-		translated_request.Action = "continue"
-		translated_request.ConversationID = continue_info.ConversationID
-		translated_request.ParentMessageID = continue_info.ParentID
-
-		response, wsConn, _, status, err = conversationClientOrder(&client, account, translated_request, proxyUrl, streamResponses, clientState, h.accountPool)
+	// 非流式路径：保持原有行为，使用新的 NewResponsesResponse 签名（含 reasoning + cache）
+	if !streamRequested {
+		response, wsConn, _, status, err := conversationClientOrder(&client, account, translated_request, proxyUrl, false, clientState, h.accountPool)
 		if err != nil {
-			if streamResponses {
-				writeResponsesStreamEvent(c, "response.failed", officialtypes.ResponsesFailed(err.Error()))
-				writeResponsesStreamDone(c)
-				return
-			}
 			c.JSON(status, gin.H{"error": gin.H{
 				"message": err.Error(),
 				"type":    "request_conversion_error",
@@ -514,16 +404,8 @@ func (h *ChatHandler) Responses(c *gin.Context) {
 				wsConn.Close()
 				wsConn = nil
 			}
-			if streamResponses {
-				writeResponsesStreamEvent(c, "response.failed", officialtypes.ResponsesFailed("upstream error"))
-				writeResponsesStreamDone(c)
-			}
 			return
 		}
-	}
-	if c.Writer.Status() != 200 {
-		return
-	}
 
 		var full_response string
 		var full_thinking string
@@ -585,9 +467,29 @@ func (h *ChatHandler) Responses(c *gin.Context) {
 		c.JSON(200, responsesResponse)
 		return
 	}
-	ensureMessageItem()
-	if reasoningAdded {
-		writeResponsesStreamEvent(c, "response.output_item.done", officialtypes.ResponsesOutputItemDone(reasoningIndex, reasoningItemID, "reasoning", full_thinking))
+
+	// ── 流式路径 ──
+	startTime := time.Now()
+	respID := "resp_" + uuid.NewString()
+	reasoningItemID := "rs_" + uuid.NewString()
+	messageItemID := "msg_" + uuid.NewString()
+
+	c.Writer.Header().Set("Content-Type", "text/event-stream")
+	c.Writer.Header().Set("Cache-Control", "no-cache")
+	c.Writer.Header().Set("Connection", "keep-alive")
+	c.Writer.Header().Set("X-Accel-Buffering", "no")
+
+	flusher, _ := c.Writer.(http.Flusher)
+
+	// response.created
+	c.Writer.WriteString("event: response.created\ndata: " + responsesCreatedEvent(respID, reqModel) + "\n\n")
+	// output_item.added (reasoning, output_index 0)
+	c.Writer.WriteString("event: response.output_item.added\ndata: " + responsesOutputItemAddedEvent(0, reasoningItemID, "reasoning") + "\n\n")
+	// output_item.added (message, output_index 1)
+	c.Writer.WriteString("event: response.output_item.added\ndata: " + responsesOutputItemAddedEvent(1, messageItemID, "message") + "\n\n")
+	if flusher != nil {
+		c.Writer.WriteHeader(200)
+		flusher.Flush()
 	}
 
 	response, wsConn, _, _, err := conversationClientOrder(&client, account, translated_request, proxyUrl, true, clientState, h.accountPool)
@@ -699,8 +601,6 @@ func (h *ChatHandler) Responses(c *gin.Context) {
 			return
 		}
 	}
-	responsesResponse.MsSinceStart = time.Since(startedAt).Milliseconds()
-	responsesResponse.MsTTFT = firstOutputAt
 
 	// output_item.done (reasoning)
 	c.Writer.WriteString("event: response.output_item.done\ndata: " + responsesOutputItemDoneEvent(0, reasoningItemID, "reasoning", full_thinking) + "\n\n")
@@ -723,16 +623,7 @@ func (h *ChatHandler) Responses(c *gin.Context) {
 	}
 }
 
-func writeResponsesStreamEvent(c *gin.Context, event, data string) {
-	_, _ = c.Writer.WriteString("event: " + event + "\n")
-	_, _ = c.Writer.WriteString("data: " + data + "\n\n")
-	c.Writer.Flush()
-}
-
-func writeResponsesStreamDone(c *gin.Context) {
-	_, _ = c.Writer.WriteString("data: [DONE]\n\n")
-	c.Writer.Flush()
-}
+// writeTimingHeader 在非流式响应中设置 timing 头部（仅非流式路径使用）。
 
 func (h *ChatHandler) Files(c *gin.Context) {
 	account, _, err := resolveAccount(c, h.accountPool, h.cfg, true)
